@@ -1,0 +1,25 @@
+# Optional. SQLite is the default and needs no containers.
+# Use this if you'd rather work against Postgres, or want to run the mock via Docker.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: lumen
+      POSTGRES_PASSWORD: lumen
+      POSTGRES_DB: lumen
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  fleetcare:
+    image: node:22-alpine
+    working_dir: /app
+    command: node server.mjs
+    environment:
+      PORT: "4010"
+      FLEETCARE_API_KEY: fc_test_key
+      CHAOS: "on"
+    volumes: ["./services/maintenance-api:/app:ro"]
+    ports: ["4010:4010"]
+
+volumes:
+  pgdata:

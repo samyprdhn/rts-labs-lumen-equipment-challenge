@@ -1,0 +1,13 @@
+site_id,name,city,state,timezone,region,superintendent
+S01,Riverside Medical Center Expansion,Richmond,VA,America/New_York,Central,Marcus Bell
+S02,Scott's Addition Mixed-Use (Bldg B),Richmond,VA,America/New_York,Central,Marcus Bell
+S03,Short Pump Town Center Parking Deck,Glen Allen,VA,America/New_York,West,Tanya Ruiz
+S04,Chesterfield Distribution Hub,Chester,VA,America/New_York,South,Tanya Ruiz
+S05,James River Bridge Rehab,Richmond,VA,America/New_York,Central,Marcus Bell
+S06,Williamsburg Elementary Replacement,Williamsburg,VA,America/New_York,East,Greg Holloway
+S07,Norfolk Harbor Warehouses,Norfolk,VA,America/New_York,East,Greg Holloway
+S08,Charlottesville Lab Building,Charlottesville,VA,America/New_York,West,Tanya Ruiz
+S09,South End Apartments Ph. 2,Charlotte,NC,America/New_York,Carolinas,Aisha Grant
+S10,Ballantyne Office Park,Charlotte,NC,America/New_York,Carolinas,Aisha Grant
+S11,Gulch Hotel Tower,Nashville,TN,America/Chicago,Tennessee,Dale Whitfield
+S12,Midtown Data Center,Nashville,TN,America/Chicago,Tennessee,Dale Whitfield

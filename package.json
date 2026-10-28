@@ -1,0 +1,16 @@
+{
+  "name": "lumen-equipment-challenge",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "seed": "node --no-warnings scripts/seed.mjs",
+    "token": "node scripts/dev-token.mjs",
+    "ai-log": "node .claude/hooks/summarize.mjs",
+    "mock": "node services/maintenance-api/server.mjs",
+    "dev:web": "npm --prefix frontend run dev",
+    "dev:ts": "npm --prefix backend-ts run dev",
+    "dev:go": "cd backend-go && go run ./cmd/api",
+    "setup": "npm --prefix frontend install && npm --prefix backend-ts install && npm run seed"
+  }
+}

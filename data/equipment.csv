@@ -1,0 +1,61 @@
+asset_tag,type,make_model,capacity,home_yard,daily_rate_usd,required_cert,status,notes
+MC-001,mobile_crane,Liebherr LTM 1090,80 ton,Norfolk Yard,3020,NCCCO Mobile Crane,active,
+MC-002,mobile_crane,Liebherr LTM 1090,80 ton,Nashville Yard,2620,NCCCO Mobile Crane,active,GPS unit replaced
+MC-003,mobile_crane,Liebherr LTM 1090,90 ton,Richmond Yard,2990,NCCCO Mobile Crane,active,GPS unit replaced
+MC-004,mobile_crane,Tadano AC 4.080,90 ton,Nashville Yard,3470,NCCCO Mobile Crane,active,
+MC-005,mobile_crane,Grove GMK5150L,90 ton,Richmond Yard,4180,NCCCO Mobile Crane,active,hydraulic leak reported 9/2 - check before use
+MC-006,mobile_crane,Liebherr LTM 1090,90 ton,Norfolk Yard,2660,NCCCO Mobile Crane,active,
+MC-007,mobile_crane,Grove GMK5150L,150 ton,Nashville Yard,3070,NCCCO Mobile Crane,active,owned by BigIron Rentals (leased)
+MC-008,mobile_crane,Grove GMK5150L,80 ton,Richmond Yard,3360,NCCCO Mobile Crane,retired,
+TC-001,tower_crane,Liebherr 280 EC-H,12 ton,Richmond Yard,5550,NCCCO Tower Crane,active,
+TC-002,tower_crane,Liebherr 280 EC-H,12 ton,Richmond Yard,5710,NCCCO Tower Crane,active,hydraulic leak reported 9/2 - check before use
+TC-003,tower_crane,Liebherr 280 EC-H,12 ton,Norfolk Yard,7010,NCCCO Tower Crane,active,
+EX-001,excavator,John Deere 250G,22 ton,Richmond Yard,1030,Excavator Operator,active,needs 48h notice to transport
+EX-002,excavator,John Deere 250G,22 ton,Richmond Yard,940,Excavator Operator,active,hydraulic leak reported 9/2 - check before use
+EX-003,excavator,John Deere 250G,22 ton,Nashville Yard,790,Excavator Operator,active,needs 48h notice to transport
+EX-004,excavator,CAT 320,22 ton,Richmond Yard,850,Excavator Operator,active,hydraulic leak reported 9/2 - check before use
+EX-005,excavator,CAT 320,22 ton,Norfolk Yard,780,Excavator Operator,active,needs 48h notice to transport
+EX-006,excavator,John Deere 250G,22 ton,Richmond Yard,810,Excavator Operator,active,
+EX-007,excavator,John Deere 250G,22 ton,Norfolk Yard,1020,Excavator Operator,active,hydraulic leak reported 9/2 - check before use
+EX-008,excavator,Komatsu PC210,22 ton,Richmond Yard,730,Excavator Operator,active,GPS unit replaced
+EX-009,excavator,CAT 320,22 ton,Richmond Yard,1050,Excavator Operator,active,
+EX-010,excavator,Komatsu PC210,22 ton,Richmond Yard,890,Excavator Operator,active,hydraulic leak reported 9/2 - check before use
+EX-011,excavator,Komatsu PC210,22 ton,Norfolk Yard,1000,Excavator Operator,active,owned by BigIron Rentals (leased)
+EX-012,excavator,John Deere 250G,22 ton,Richmond Yard,1080,Excavator Operator,active,GPS unit replaced
+SS-001,skid_steer,CAT 262D3,,Norfolk Yard,350,,active,
+SS-002,skid_steer,CAT 262D3,,Richmond Yard,250,,active,owned by BigIron Rentals (leased)
+SS-003,skid_steer,Bobcat S770,,Norfolk Yard,270,,active,GPS unit replaced
+SS-004,skid_steer,Bobcat S770,,Norfolk Yard,370,,active,
+SS-005,skid_steer,CAT 262D3,,Richmond Yard,230,,active,
+SS-006,skid_steer,Bobcat S770,,Charlotte Yard,240,,active,owned by BigIron Rentals (leased)
+SS-007,skid_steer,Bobcat S770,,Charlotte Yard,270,,active,
+SS-008,skid_steer,CAT 262D3,,Nashville Yard,280,,active,needs 48h notice to transport
+BL-001,boom_lift,Genie S-65,,Nashville Yard,440,Aerial Lift,active,
+BL-002,boom_lift,JLG 600S,,Richmond Yard,480,Aerial Lift,active,GPS unit replaced
+BL-003,boom_lift,JLG 600S,,Richmond Yard,500,Aerial Lift,active,
+BL-004,boom_lift,JLG 600S,,Richmond Yard,460,Aerial Lift,active,
+BL-005,boom_lift,Genie S-65,,Nashville Yard,340,Aerial Lift,active,needs 48h notice to transport
+BL-006,boom_lift,Genie S-65,,Charlotte Yard,430,Aerial Lift,active,
+BL-007,boom_lift,Genie S-65,,Charlotte Yard,430,Aerial Lift,active,hydraulic leak reported 9/2 - check before use
+BL-008,boom_lift,JLG 600S,,Richmond Yard,310,Aerial Lift,active,hydraulic leak reported 9/2 - check before use
+BL-009,boom_lift,JLG 600S,,Richmond Yard,360,Aerial Lift,active,GPS unit replaced
+SL-001,scissor_lift,Skyjack SJ4632,,Norfolk Yard,210,Aerial Lift,active,
+SL-002,scissor_lift,Genie GS-3246,,Nashville Yard,150,Aerial Lift,active,
+SL-003,scissor_lift,Genie GS-3246,,Richmond Yard,160,Aerial Lift,active,hydraulic leak reported 9/2 - check before use
+SL-004,scissor_lift,Genie GS-3246,,Richmond Yard,160,Aerial Lift,active,hydraulic leak reported 9/2 - check before use
+SL-005,scissor_lift,Skyjack SJ4632,,Charlotte Yard,180,Aerial Lift,retired,hydraulic leak reported 9/2 - check before use
+SL-006,scissor_lift,Skyjack SJ4632,,Richmond Yard,180,Aerial Lift,active,
+SL-007,scissor_lift,Genie GS-3246,,Norfolk Yard,140,Aerial Lift,active,
+SL-008,scissor_lift,Genie GS-3246,,Nashville Yard,150,Aerial Lift,active,owned by BigIron Rentals (leased)
+TH-001,telehandler,JLG 1055,,Richmond Yard,540,Telehandler,active,
+TH-002,telehandler,JLG 1055,,Nashville Yard,430,Telehandler,active,GPS unit replaced
+TH-003,telehandler,CAT TL943D,,Richmond Yard,630,Telehandler,active,needs 48h notice to transport
+TH-004,telehandler,CAT TL943D,,Richmond Yard,630,Telehandler,active,needs 48h notice to transport
+TH-005,telehandler,CAT TL943D,,Richmond Yard,560,Telehandler,active,GPS unit replaced
+TH-006,telehandler,JLG 1055,,Nashville Yard,480,Telehandler,active,GPS unit replaced
+TH-007,telehandler,CAT TL943D,,Richmond Yard,530,Telehandler,active,
+DZ-001,dozer,Komatsu D61,,Nashville Yard,900,Dozer Operator,active,needs 48h notice to transport
+DZ-002,dozer,Komatsu D61,,Richmond Yard,1460,Dozer Operator,active,
+DZ-003,dozer,CAT D6,,Nashville Yard,990,Dozer Operator,active,
+DZ-004,dozer,CAT D6,,Norfolk Yard,1030,Dozer Operator,active,needs 48h notice to transport
+DZ-005,dozer,Komatsu D61,,Charlotte Yard,1060,Dozer Operator,active,owned by BigIron Rentals (leased)

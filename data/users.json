@@ -1,0 +1,92 @@
+{
+  "_comment": "Demo users. Roles and site assignments come from Lumen's HR system nightly. '*' means all sites.",
+  "users": [
+    {
+      "user_id": "u-ops-01",
+      "name": "Dana Whitaker",
+      "email": "dana.whitaker@lumen-builders.example",
+      "role": "ops_director",
+      "site_ids": [
+        "*"
+      ]
+    },
+    {
+      "user_id": "u-sup-01",
+      "name": "Marcus Bell",
+      "email": "marcus.bell@lumen-builders.example",
+      "role": "superintendent",
+      "site_ids": [
+        "S01",
+        "S02",
+        "S05"
+      ]
+    },
+    {
+      "user_id": "u-sup-02",
+      "name": "Tanya Ruiz",
+      "email": "tanya.ruiz@lumen-builders.example",
+      "role": "superintendent",
+      "site_ids": [
+        "S03",
+        "S04",
+        "S08"
+      ]
+    },
+    {
+      "user_id": "u-sup-03",
+      "name": "Dale Whitfield",
+      "email": "dale.whitfield@lumen-builders.example",
+      "role": "superintendent",
+      "site_ids": [
+        "S11",
+        "S12"
+      ]
+    },
+    {
+      "user_id": "u-for-01",
+      "name": "Hector Lopez",
+      "email": "hector.lopez@lumen-builders.example",
+      "role": "foreman",
+      "site_ids": [
+        "S01"
+      ]
+    },
+    {
+      "user_id": "u-for-02",
+      "name": "Aisha Grant",
+      "email": "aisha.grant@lumen-builders.example",
+      "role": "foreman",
+      "site_ids": [
+        "S09",
+        "S10"
+      ]
+    },
+    {
+      "user_id": "u-saf-01",
+      "name": "Priya Nair",
+      "email": "priya.nair@lumen-builders.example",
+      "role": "safety_manager",
+      "site_ids": [
+        "*"
+      ]
+    },
+    {
+      "user_id": "u-sub-01",
+      "name": "Jordan Pike (Pike Steel Erectors)",
+      "email": "jordan@pikesteel.example",
+      "role": "subcontractor",
+      "site_ids": [
+        "S01"
+      ]
+    },
+    {
+      "user_id": "u-sub-02",
+      "name": "Renee Cole (Cole Electric)",
+      "email": "renee@coleelectric.example",
+      "role": "subcontractor",
+      "site_ids": [
+        "S11"
+      ]
+    }
+  ]
+}

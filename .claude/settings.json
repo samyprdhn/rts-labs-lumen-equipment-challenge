@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai-log.mjs\" prompt" }] }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write|Bash|ExitPlanMode|TodoWrite|TaskCreate|TaskUpdate|Skill|Task|Agent",
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai-log.mjs\" tool" }]
+      }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai-log.mjs\" stop" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai-log.mjs\" session-end" }] }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Edit(./services/maintenance-api/**)",
+      "Edit(./data/**)"
+    ]
+  }
+}
