@@ -17,8 +17,19 @@ func New() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"ok":true}`))
 	})
-	jwtSecret := config.Get("JWT_SECRET", "")
-	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(jwtSecret, http.HandlerFunc(handlers.Availability)))
+	authCfg := auth.Config{
+		Secret:   config.Get("JWT_SECRET", ""),
+		Issuer:   config.Get("JWT_ISSUER", "lumen-dev"),
+		Audience: config.Get("JWT_AUDIENCE", "lumen-equipment-api"),
+	}
+	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.Availability)))
+	// A custom Authorization header always triggers a CORS preflight
+	// (it isn't a "simple" header per the Fetch spec); without an OPTIONS
+	// response the browser never sends the real GET at all. No auth here -
+	// preflight requests never carry credentials.
+	mux.HandleFunc("OPTIONS /api/equipment/availability", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	return Wrap(mux)
 }
@@ -55,6 +66,8 @@ func cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+				w.Header().Set("Access-Control-Max-Age", "600")
 				break
 			}
 		}

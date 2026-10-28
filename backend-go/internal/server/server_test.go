@@ -19,6 +19,10 @@ import (
 
 func TestMain(m *testing.M) {
 	os.Setenv("REPO_ROOT", "../../..")
+	// See the identical comment in internal/handlers/availability_test.go:
+	// the ambient .env's JWT_SECRET is too short for RequireAuth's new
+	// minimum, by design - tests must not depend on it.
+	os.Setenv("JWT_SECRET", "test-secret-for-server-tests-32-bytes-min")
 	config.LoadEnv()
 	db.Open()
 	handlers.InitFleetCareWithFetcher(noopFetcher{}, 0, 0)
@@ -92,5 +96,31 @@ func TestCORS_AllowedVsOther(t *testing.T) {
 	handler.ServeHTTP(rec2, other)
 	if got := rec2.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("expected no CORS header for a non-allowed origin, got %q", got)
+	}
+}
+
+// A custom Authorization header always triggers a CORS preflight per the
+// Fetch spec; without a 2xx OPTIONS response carrying
+// Access-Control-Allow-Methods, a real cross-origin browser request would
+// never get past the preflight to send the actual GET. This was found and
+// fixed during the auth security review (docs/reviews/2026-10-28-part1-auth-review.md),
+// not caught by TestCORS_AllowedVsOther because that test never sent an
+// OPTIONS request.
+func TestCORS_PreflightSucceedsForAllowedOrigin(t *testing.T) {
+	req := httptest.NewRequest("OPTIONS", "/api/equipment/availability", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "Authorization")
+	rec := httptest.NewRecorder()
+	server.New().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for a preflight OPTIONS request, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "GET") {
+		t.Fatalf("expected Access-Control-Allow-Methods to include GET, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("expected the allowed origin reflected on the preflight response, got %q", got)
 	}
 }

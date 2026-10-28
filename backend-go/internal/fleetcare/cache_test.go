@@ -3,6 +3,8 @@ package fleetcare
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -158,5 +160,49 @@ func TestCache_RespectsRetryAfter(t *testing.T) {
 	cache.EnsureFresh(context.Background(), []string{"MC-004"}, t0.Add(11*time.Minute)) // past RetryAfter
 	if fetcher.calls != 2 {
 		t.Fatalf("expected a retry after Retry-After elapsed, got %d calls", fetcher.calls)
+	}
+}
+
+// slowFetcher simulates real network latency so concurrent EnsureFresh
+// calls genuinely overlap in time, rather than racing through in-process
+// with no real chance of interleaving.
+type slowFetcher struct {
+	calls int32
+	delay time.Duration
+}
+
+func (f *slowFetcher) FetchAll(ctx context.Context, tags []string) (map[string][]Window, error) {
+	atomic.AddInt32(&f.calls, 1)
+	time.Sleep(f.delay)
+	out := map[string][]Window{}
+	for _, tag := range tags {
+		out[tag] = []Window{}
+	}
+	return out, nil
+}
+
+// Found during the auth security review: EnsureFresh used to release its
+// lock before calling the fetcher, so N concurrent requests arriving while
+// the cache was stale would each independently decide a refresh was due
+// and each fire their own fetch - up to N times the intended FleetCare
+// load, against the explicit "avoid retry storms" requirement. This proves
+// concurrent callers now collapse into exactly one fetch.
+func TestCache_ConcurrentEnsureFreshCollapsesToOneFetch(t *testing.T) {
+	fetcher := &slowFetcher{delay: 100 * time.Millisecond}
+	cache := NewCache(fetcher, time.Hour, time.Hour) // long TTL: still "due" for every concurrent caller at cold start
+
+	const concurrency = 20
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			cache.EnsureFresh(context.Background(), []string{"MC-004"}, time.Now())
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&fetcher.calls); got != 1 {
+		t.Fatalf("expected exactly 1 fetch for %d concurrent callers hitting a cold cache, got %d", concurrency, got)
 	}
 }

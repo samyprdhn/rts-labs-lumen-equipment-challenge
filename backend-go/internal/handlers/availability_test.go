@@ -43,21 +43,35 @@ func resetFleetCareDefault() {
 
 func TestMain(m *testing.M) {
 	os.Setenv("REPO_ROOT", "../../..")
+	// Set before LoadEnv (which only fills in unset vars) so tests don't
+	// depend on the ambient .env's secret meeting RequireAuth's minimum
+	// length - exactly the brittleness write-tests warns about. This is
+	// not a workaround for a bug: the real local .env's JWT_SECRET is
+	// shorter than 32 bytes, and RequireAuth now correctly refuses to
+	// start with it (see docs/reviews/2026-10-28-part1-auth-review.md).
+	os.Setenv("JWT_SECRET", "test-secret-for-handlers-tests-32-bytes-min")
 	config.LoadEnv()
 	db.Open()
 	resetFleetCareDefault()
 	os.Exit(m.Run())
 }
 
-// token signs claims exactly as scripts/dev-token.mjs does, including a
-// real exp claim - RequireAuth now verifies the signature and requires a
-// valid, unexpired exp, so a test fixture without one would be rejected,
-// correctly, but wouldn't be testing what these tests are meant to test.
+// token signs claims exactly as scripts/dev-token.mjs does, including
+// real exp/iss/aud claims - RequireAuth now verifies the signature and
+// requires a valid, unexpired exp plus a matching issuer/audience, so a
+// test fixture without them would be rejected, correctly, but wouldn't be
+// testing what these tests are meant to test.
 func token(claims map[string]any) string {
 	enc := base64.RawURLEncoding
 	h, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
 	if _, ok := claims["exp"]; !ok {
 		claims["exp"] = time.Now().Add(time.Hour).Unix()
+	}
+	if _, ok := claims["iss"]; !ok {
+		claims["iss"] = "lumen-dev"
+	}
+	if _, ok := claims["aud"]; !ok {
+		claims["aud"] = "lumen-equipment-api"
 	}
 	p, _ := json.Marshal(claims)
 	unsigned := enc.EncodeToString(h) + "." + enc.EncodeToString(p)

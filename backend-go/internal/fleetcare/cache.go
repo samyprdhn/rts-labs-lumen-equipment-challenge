@@ -23,11 +23,19 @@ type Fetcher interface {
 // Cold start (no successful fetch yet for a tag) and data older than
 // staleAfter both report as "unknown" - this is deliberate: an availability
 // consumer must never read "ok" for data we don't actually have confidence
-// in. There is no built-in retry loop; EnsureFresh is called once per
-// incoming request and only attempts a fetch when the TTL has elapsed and
-// no rate-limit backoff is in effect, so there is no retry storm.
+// in. There is no built-in retry loop; EnsureFresh only attempts a fetch
+// when the TTL has elapsed and no rate-limit backoff is in effect.
+//
+// refreshMu serializes refresh attempts (held for the whole network call,
+// not just the map access mu protects): without it, N concurrent requests
+// arriving while the cache is stale would each independently decide a
+// refresh is due and each fire their own batch of FleetCare calls - up to
+// N times the intended load, working against the "avoid retry storms"
+// requirement under real concurrent traffic. Status() reads only take mu,
+// so they're never blocked by an in-flight refresh.
 type Cache struct {
 	mu           sync.Mutex
+	refreshMu    sync.Mutex
 	fetcher      Fetcher
 	ttl          time.Duration
 	staleAfter   time.Duration
@@ -52,8 +60,14 @@ func NewCache(fetcher Fetcher, ttl, staleAfter time.Duration) *Cache {
 
 // EnsureFresh refreshes any of tags whose data is older than the TTL (or
 // never fetched), unless a prior 429 has us backed off past `now`. It never
-// retries beyond this single attempt per call.
+// retries beyond this single attempt per call, and at most one refresh is
+// ever in flight at a time (see refreshMu) - a second caller arriving while
+// one is in progress waits for it, then re-checks staleness rather than
+// firing its own redundant fetch.
 func (c *Cache) EnsureFresh(ctx context.Context, tags []string, now time.Time) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
 	c.mu.Lock()
 	if now.Before(c.blockedUntil) {
 		c.mu.Unlock()
