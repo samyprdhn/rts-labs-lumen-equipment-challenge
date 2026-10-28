@@ -76,16 +76,25 @@ export default function App() {
       <div className="title">Equipment Availability</div>
 
       <div className="filters">
-        <select value={type} onChange={(e) => setType(e.target.value)}>
-          {TYPES.map((t) => (
-            <option key={t}>{t}</option>
-          ))}
-        </select>
-        <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
-        <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
-        <div className="btn" onClick={() => { localStorage.removeItem("token"); setToken(""); }}>
-          Log out
+        <div className="field">
+          <label htmlFor="type-filter">Equipment type</label>
+          <select id="type-filter" value={type} onChange={(e) => setType(e.target.value)}>
+            {TYPES.map((t) => (
+              <option key={t}>{t}</option>
+            ))}
+          </select>
         </div>
+        <div className="field">
+          <label htmlFor="start-filter">Start date</label>
+          <input id="start-filter" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="end-filter">End date</label>
+          <input id="end-filter" type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+        </div>
+        <button className="btn" onClick={() => { localStorage.removeItem("token"); setToken(""); }}>
+          Log out
+        </button>
       </div>
 
       {state === "loading" && <div className="status-message" role="status">Loading availability…</div>}
@@ -106,9 +115,18 @@ export default function App() {
       {items.length > 0 && (
         <div className="grid">
           {items.map((item) => (
-            <div className="card" key={item.asset_tag} onClick={() => alert(item.notes || "No notes")}>
-              <span className={item.available ? "dot green" : "dot red"} />
+            <button
+              type="button"
+              className="card"
+              key={item.asset_tag}
+              onClick={() => alert(item.notes || "No notes")}
+              aria-label={`${item.asset_tag}, ${item.available ? "available" : "unavailable"}. View notes.`}
+            >
+              <span className={item.available ? "dot green" : "dot red"} aria-hidden="true" />
               <div className="tag">{item.asset_tag}</div>
+              <div className={`status-text ${item.available ? "available" : "unavailable"}`}>
+                {item.available ? "Available" : "Unavailable"}
+              </div>
               <div className="muted">{item.make_model} {item.capacity}</div>
               {item.daily_rate_usd && <div className="muted">${item.daily_rate_usd}/day · {item.home_yard}</div>}
               {!item.daily_rate_usd && <div className="muted">{item.home_yard}</div>}
@@ -125,7 +143,7 @@ export default function App() {
                   {item.maintenance.status === "in_maintenance" ? "In maintenance (FleetCare)" : "Maintenance status unknown"}
                 </div>
               )}
-            </div>
+            </button>
           ))}
         </div>
       )}
