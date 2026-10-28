@@ -13,3 +13,6 @@ body { margin: 0; font-family: -apple-system, system-ui, sans-serif; background:
 .dot { position: absolute; top: 12px; right: 12px; width: 10px; height: 10px; border-radius: 50%; }
 .dot.green { background: #3c3; }
 .dot.red { background: #e33; }
+.status-message { padding: 16px; border: 1px solid #eee; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+.status-error { border-color: #e33; color: #a00; }
+.status-error .btn { margin-left: auto; }

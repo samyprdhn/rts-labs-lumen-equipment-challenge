@@ -29,3 +29,10 @@ Append entries with the `checkpoint` skill (or by hand). Newest at the bottom.
 - **Decisions / changes of direction:** none beyond the approved plan.
 - **Next:** Increment 5 — frontend loading/empty/error/retry states.
 - **Open questions / risks:** none new.
+
+## 2026-10-28 18:35 — Increment 5: frontend loading/empty/error/retry states
+- **Done:** `App.tsx` has an explicit `idle|loading|success|error` state machine: loading indicator (previous results stay visible, not blanked), distinct empty state, error state with the real server message and a Retry button, and a stale-response guard. Updated card rendering to match the backend's new response contract (no operator data, redacted-conflict placeholder text, conditional `daily_rate_usd`, new maintenance line).
+- **Tests:** `npm test` (frontend) — 2 files, 8/8 passed. Fixed a pre-existing RTL cleanup gap found while adding the second test file (cross-test interference once more than one test shared the file). Manually verified the login and error states live in the browser against the real backend; success/loading/empty states verified via the automated suite and prior increments' live backend checks (blocked from a full live click-through only by the same external-checkout port collision noted earlier - proxy was temporarily repointed and reverted, confirmed via `git status`).
+- **Decisions / changes of direction:** "keep previous results visible during loading" - a UI design question the plan had left open - decided here as the simpler, more context-preserving default; reversible.
+- **Next:** Increment 6 — mobile/contrast/keyboard/focus/accessible status messages.
+- **Open questions / risks:** none new. An attempt to write a real dev token to a file for a fuller live browser check was correctly blocked by the sandbox's credential-handling safeguard; worked around without materializing a real token anywhere.
