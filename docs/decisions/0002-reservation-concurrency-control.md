@@ -1,0 +1,74 @@
+# 0002 — Reservation concurrency control (no two overlapping bookings ever both commit)
+
+- **Status:** proposed
+- **Date:** 2026-10-28
+
+## Context
+
+`POST /api/reservations` (Part 2) must guarantee that two overlapping reservations for the same asset never both commit, even when requests arrive at the same instant — "if two of my foremen grab the same excavator, fine, first one wins. But tell the second guy right away" (Marcus). A naive read-then-write (`SELECT` for conflicts, then `INSERT` if none found) is not that guarantee: between the `SELECT` and the `INSERT`, a second request can run the identical `SELECT`, see the same "no conflict," and also `INSERT` — both succeed, producing exactly the double-booking this system exists to prevent. This is not hypothetical: Part 1's recon found 18 pairs of confirmed-vs-confirmed double-bookings already sitting in the historical spreadsheet export, produced by the human equivalent of this exact race. I was explicitly told not to propose this sequence without an atomic guarantee underneath it, and I'm not.
+
+Backend is Go, per [ADR 0001](0001-choose-go-backend.md); database is SQLite (`modernc.org/sqlite`, pure Go, no cgo), unchanged from Part 1.
+
+Three throwaway experiments (outside the repo, not committed) informed this decision, each run as genuinely concurrent OS processes, not goroutines racing in one process:
+
+1. **Plain `BEGIN IMMEDIATE`, no `busy_timeout`**: the losing writer fails in under 1ms with `SQLITE_BUSY` — confirms SQLite's single-writer lock is real and immediate.
+2. **`BEGIN IMMEDIATE` with `PRAGMA busy_timeout=5000`**: the losing writer *waits* (observed ~338ms, matching the winner's hold time) instead of failing, then proceeds — **but both transactions still committed their own row**, because neither one's application code actually re-checked for a conflict inside the lock. This is the key finding: **`busy_timeout` changes the failure mode from "immediate error" to "wait and retry access," it does not by itself enforce the invariant.** The check-then-insert logic inside the lock is what has to be correct.
+3. **A `BEFORE INSERT` trigger** (full SQL in Options, below) that rejects an overlapping, non-cancelled row: run 10 times as truly concurrent processes, each attempting a naive **bare `INSERT`** — no app-level check, no explicit transaction at all. **Exactly one row committed every single time**, the loser rejected with a specific, `errors.As`-catchable Go error (`*sqlite.Error`, `.Code() == 1811`, `SQLITE_CONSTRAINT_TRIGGER`) distinguishable from ordinary lock contention (`SQLITE_BUSY`, code 5). Also confirmed: in `PRAGMA journal_mode=WAL`, a `SELECT` (an availability read) completed in ~46ms while a writer held its lock mid-transaction for 300ms — readers are not blocked by an in-flight write.
+
+## Options considered
+
+### A. Application-level `BEGIN IMMEDIATE` transaction, check-then-insert inside it
+
+The handler opens `BEGIN IMMEDIATE` (acquires SQLite's write lock up front, not lazily on first write — this is the detail that matters: a plain `BEGIN` defers lock acquisition, and an earlier experiment this engagement showed two plain-`BEGIN` transactions can both pass their own `SELECT` check before either writes). Inside that transaction: run the same `availability.Overlaps`/`FindConflict` logic already built in Part 1 against currently-committed rows; if clear, `INSERT`; either way, `COMMIT`/`ROLLBACK`.
+
+- **Two concurrent requests:** the second's `BEGIN IMMEDIATE` blocks (with `busy_timeout` set) until the first commits or rolls back, then its own check correctly sees the first's result. Proven safe in an earlier experiment this engagement (two separate OS processes, `BEGIN IMMEDIATE`, one winner, one clean `SQLITE_BUSY`).
+- **Transaction boundary:** the entire check-then-insert sequence, start to finish — this *is* the atomic unit, same pattern Part 1's `security-review` skill would expect to see on a write path.
+- **Independent connections/instances:** SQLite's write lock is file-level, not connection-level or process-level — it serializes correctly across any number of connections or OS processes writing the *same file on the same machine*. It does **not** serialize across machines or networked filesystems; see "Postgres/multi-instance" below.
+- **Lock contention / busy handling:** without `busy_timeout`, immediate `SQLITE_BUSY` on contention (bad UX for ordinary, non-malicious races — two foremen a few hundred ms apart). With a bounded `busy_timeout` (proposed: 3s, matching the FleetCare client's own bound from Part 1), ordinary contention resolves silently; pathological contention still bounds out to a catchable error rather than hanging.
+- **Postgres / multi-instance:** the equivalent is a `SERIALIZABLE` transaction (or `SELECT ... FOR UPDATE` on a per-asset row) — Postgres's MVCC means the database itself, not a local file lock, is the coordination point, so this *does* extend correctly to multiple API instances/machines without further change, unlike SQLite's file-lock story.
+- **Invariant enforced by DB vs. app:** the DB enforces *mutual exclusion* (nobody else writes while I hold the lock); the *overlap logic itself* is 100% application code. Nothing in the schema stops a different code path — a future admin tool, a bulk-import script, a bug in a second handler — from inserting a conflicting row without going through this exact function. This is Option A's real weakness: the invariant's correctness depends on every future writer remembering to use it.
+
+### B. Database-level `BEFORE INSERT` trigger (recommended, combined with A)
+
+```sql
+CREATE TRIGGER no_overlapping_active_bookings
+BEFORE INSERT ON bookings
+WHEN NEW.status != 'cancelled'
+BEGIN
+  SELECT RAISE(ABORT, 'overlapping booking exists')
+  WHERE EXISTS (
+    SELECT 1 FROM bookings
+    WHERE asset_tag = NEW.asset_tag
+      AND status != 'cancelled'
+      AND NEW.start_at_utc < end_at_utc
+      AND start_at_utc < NEW.end_at_utc
+  );
+END;
+```
+
+(`start_at_utc`/`end_at_utc` — see "A necessary companion change," below — not the existing `start_at`/`end_at` columns.)
+
+- **Two concurrent requests:** proven empirically, not just argued — 10/10 trials with genuinely concurrent processes doing nothing but a bare `INSERT`, exactly one winner every time. The trigger runs *inside* whatever transaction wraps the `INSERT` (explicit or SQLite's own implicit one), and because SQLite fully serializes writers, the second trigger invocation always sees the first's committed row before deciding.
+- **Transaction boundary:** the `INSERT` statement itself — even the most careless possible caller (a bare, unwrapped `INSERT`, no app-level check at all) is still safe. This is strictly stronger than Option A alone.
+- **Independent connections/instances:** same SQLite file-lock mechanics as Option A for *how* writers serialize — but the invariant itself is enforced by the schema, not by whichever handler happens to call it correctly. A second connection, a second process, a future endpoint, an admin script — all go through the same trigger, because it's attached to the table, not to one code path.
+- **Lock contention / busy handling:** identical to Option A (same `busy_timeout`); the difference is what the loser's error *means*. `SQLITE_BUSY` (code 5) = "try again, transient contention." `SQLITE_CONSTRAINT_TRIGGER` (code 1811) = "there is a real, durable conflict, don't retry." Reliably distinguishable via `errors.As(err, &sqliteErr)` + `sqliteErr.Code()` (verified directly, not assumed) — this maps cleanly to 503-retry vs. 409-conflict without the application having to re-derive that distinction itself.
+- **Postgres / multi-instance:** a PL/pgSQL trigger with the same logic would work, but Postgres's idiomatic mechanism for "no two rows with equal `asset_tag` whose ranges overlap" is a native `EXCLUDE` constraint (`tstzrange` + `btree_gist`) — declarative, self-documenting, and enforced via a GiST index rather than a per-insert linear scan. At a Postgres migration (Part 3C), I'd recommend replacing the trigger with an exclusion constraint, not porting the trigger verbatim.
+- **Invariant enforced by DB vs. app:** the core invariant — *no two active bookings for one asset ever overlap* — lives entirely in the schema. This survives future code mistakes in a way Option A alone cannot. Application code is still responsible for everything the trigger can't see: authorization, operator/certification validity (a cross-table, business-policy check that doesn't belong in a row-level trigger), and the tentative-vs-tentative nuance below.
+
+### Why not either alone
+
+Option A alone is exactly the "implementation convenience" the review instruction warned against relying on solely — it's correct *only if every future writer remembers the pattern*, and this codebase's own history (the inherited availability bug, the inherited double-bookings) is evidence that assumption doesn't hold for this team under time pressure. Option B alone (a bare `INSERT` with no app-level `BEGIN IMMEDIATE`) is safe for the overlap invariant specifically, but gives up the natural place to *also* atomically write audit fields, check certification validity, and return a clean, well-shaped error — all of which want an explicit transaction boundary anyway.
+
+## Decision
+
+**Combine both.** The reservation handler opens `BEGIN IMMEDIATE` (bounded by a `busy_timeout`), performs authorization and certification checks, then attempts the `INSERT`; the trigger is the backstop that makes the core overlap invariant hold *even if the application-level check has a bug or a future code path skips it*. The trigger's `SQLITE_CONSTRAINT_TRIGGER` error is caught and mapped to `409 Conflict`; `SQLITE_BUSY` (if contention outlasts `busy_timeout`) maps to `503` with `Retry-After`. `PRAGMA journal_mode=WAL` is enabled so availability reads (Part 1's endpoint, and anyone polling it) are never blocked by an in-flight reservation write — confirmed empirically, not assumed.
+
+### A necessary companion change: canonical UTC columns
+
+The trigger's overlap check is a **raw SQL string comparison** — it cannot call Go's multi-format date parser. Part 1 found 4 incompatible raw date formats across the 743 historical bookings; comparing those directly in SQL would silently reproduce the exact string-comparison bug Part 1 fixed in application code, except now unfixable from Go. The fix: add two new, additive columns, `start_at_utc`/`end_at_utc` (strict ISO-8601 UTC text, which *does* sort correctly as a string), populated by application code — at write time for every new reservation, and via a **one-time backfill** for the 743 existing rows using the exact, already-tested `availability.ParseBookingTime` function from Part 1 (which already has zero parse failures proven against this exact dataset, including after a full reseed — see `docs/reviews` from Part 1). The original `start_at`/`end_at` columns are left untouched — this is additive, not a rewrite, and carries over Part 1's own evidence that the parser handles 100% of the real data rather than assuming it will. The trigger reads only the new canonical columns, making its string comparison provably safe.
+
+## Consequences
+
+- **Easier:** the overlap invariant can never be silently reintroduced by a future handler, admin script, or bug — it's enforced by the schema. Error handling is simple and precise (`SQLITE_CONSTRAINT_TRIGGER` vs. `SQLITE_BUSY` are different, catchable conditions). Availability reads are never blocked by a reservation write (WAL).
+- **Harder:** SQLite triggers are less visible/discoverable than application code to someone unfamiliar with the schema (mitigated by this ADR and a schema comment). The backfill is a new, one-time migration step that needs its own verification pass against the real data before Part 2 ships (same discipline Part 1 used: run against the full reseed, report any row that doesn't parse, don't weaken the rule to force it to pass).
+- **Revisit when:** moving to Postgres (replace the trigger with a native `EXCLUDE` constraint — don't port the trigger) or moving to multiple API instances/machines sharing one database (the SQLite file-lock story doesn't extend across machines; Postgres's does, which is itself a reason to prioritize that migration before any multi-instance deployment, not after).
