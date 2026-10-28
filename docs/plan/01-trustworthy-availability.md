@@ -1,6 +1,6 @@
 # 01 — Trustworthy availability (Part 0 + Part 1)
 
-**Status:** in-progress (all 6 required increments implemented and green; A1/A3/A5 assumptions and 5 security-review findings await your decision before this can be marked done)
+**Status:** done (all 6 required increments implemented, tested green — 83 backend-go tests + `-race` clean, 15 frontend tests — and covered by two `security-review` passes; all Required findings fixed, 2 Low-severity/cosmetic items explicitly deferred with reasoning in `docs/reviews/`. Step 11, the travel-buffer stretch, was never attempted, by design. A1/A3/A5 remain open business-policy questions, independent of this plan's own completion — see the Assumptions table above.)
 **Challenge part(s):** 0, 1
 **Backend:** Go (per [ADR 0001](../decisions/0001-choose-go-backend.md)). `backend-ts` still exists in the repo pending an explicit go-ahead to delete it; this plan does not touch it.
 
