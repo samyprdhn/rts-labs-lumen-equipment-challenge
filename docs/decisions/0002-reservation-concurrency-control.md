@@ -1,7 +1,7 @@
 # 0002 — Reservation concurrency control (no two overlapping bookings ever both commit)
 
 - **Status:** proposed
-- **Date:** 2026-10-28
+- **Date:** 2026-10-28 (revised same day — tentative-hold lifecycle resolved, see "Tentative-hold lifecycle" below)
 
 ## Context
 
@@ -33,20 +33,23 @@ The handler opens `BEGIN IMMEDIATE` (acquires SQLite's write lock up front, not 
 ```sql
 CREATE TRIGGER no_overlapping_active_bookings
 BEFORE INSERT ON bookings
-WHEN NEW.status != 'cancelled'
+WHEN NEW.status IN ('confirmed', 'tentative')
 BEGIN
-  SELECT RAISE(ABORT, 'overlapping booking exists')
+  SELECT RAISE(ABORT, 'overlapping active booking exists')
   WHERE EXISTS (
     SELECT 1 FROM bookings
     WHERE asset_tag = NEW.asset_tag
-      AND status != 'cancelled'
+      AND (
+        status = 'confirmed'
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+      )
       AND NEW.start_at_utc < end_at_utc
       AND start_at_utc < NEW.end_at_utc
   );
 END;
 ```
 
-(`start_at_utc`/`end_at_utc` — see "A necessary companion change," below — not the existing `start_at`/`end_at` columns.)
+(`start_at_utc`/`end_at_utc`/`expires_at_utc` — see "A necessary companion change" and "Tentative-hold lifecycle," below — not the existing `start_at`/`end_at` columns. The `WHEN` clause and the `expires_at_utc` condition were added after the policy resolution below; the originally-proposed version only excluded `status='cancelled'`.)
 
 - **Two concurrent requests:** proven empirically, not just argued — 10/10 trials with genuinely concurrent processes doing nothing but a bare `INSERT`, exactly one winner every time. The trigger runs *inside* whatever transaction wraps the `INSERT` (explicit or SQLite's own implicit one), and because SQLite fully serializes writers, the second trigger invocation always sees the first's committed row before deciding.
 - **Transaction boundary:** the `INSERT` statement itself — even the most careless possible caller (a bare, unwrapped `INSERT`, no app-level check at all) is still safe. This is strictly stronger than Option A alone.
@@ -67,8 +70,57 @@ Option A alone is exactly the "implementation convenience" the review instructio
 
 The trigger's overlap check is a **raw SQL string comparison** — it cannot call Go's multi-format date parser. Part 1 found 4 incompatible raw date formats across the 743 historical bookings; comparing those directly in SQL would silently reproduce the exact string-comparison bug Part 1 fixed in application code, except now unfixable from Go. The fix: add two new, additive columns, `start_at_utc`/`end_at_utc` (strict ISO-8601 UTC text, which *does* sort correctly as a string), populated by application code — at write time for every new reservation, and via a **one-time backfill** for the 743 existing rows using the exact, already-tested `availability.ParseBookingTime` function from Part 1 (which already has zero parse failures proven against this exact dataset, including after a full reseed — see `docs/reviews` from Part 1). The original `start_at`/`end_at` columns are left untouched — this is additive, not a rewrite, and carries over Part 1's own evidence that the parser handles 100% of the real data rather than assuming it will. The trigger reads only the new canonical columns, making its string comparison provably safe.
 
+## Tentative-hold lifecycle (resolves B2 from the Part 2 plan)
+
+After this ADR was first written, the tentative-vs-confirmed question was resolved with a specific policy, not left to my own default:
+
+1. A tentative hold is visible to other users (who, what site, requested dates, expiration) — not a silent block.
+2. A tentative hold **does** protect the equipment: a competing request for overlapping dates gets an immediate conflict response, not a silent override.
+3. Every tentative hold has a **required expiration deadline** and is treated as released once it passes, without a human action. The owner may confirm early or release early.
+4. Confirming a hold converts it to a firm reservation, **atomically enforced the same way** — two simultaneous confirm attempts, or a confirm racing a new competing request, must not both succeed.
+
+This is a real extension of scope, not just an answered question, flagged explicitly rather than absorbed quietly: it requires (a) an `expires_at_utc` column, (b) **lazy** expiration — a hold past its deadline is treated as released at read/write time, not swept by a background job (no scheduler infrastructure exists in this codebase yet; an active sweeper is a reasonable later addition, not required for the guarantee to hold), and (c) **two new, narrow endpoints** — confirm and release — acting on an existing `booking_id`, each a single status transition, not a general edit/`PATCH`. The `BEFORE INSERT` trigger above was revised accordingly (point 2 is now the`WHEN`/`expires_at_utc` clause). Point 4 needs a second trigger, because confirming a hold is an `UPDATE`, which a `BEFORE INSERT` trigger never sees:
+
+```sql
+CREATE TRIGGER no_overlap_on_confirm
+BEFORE UPDATE OF status ON bookings
+WHEN NEW.status = 'confirmed' AND OLD.status = 'tentative'
+BEGIN
+  SELECT RAISE(ABORT, 'hold has expired')
+  WHERE OLD.expires_at_utc IS NOT NULL AND OLD.expires_at_utc <= datetime('now');
+
+  SELECT RAISE(ABORT, 'overlapping active booking exists')
+  WHERE EXISTS (
+    SELECT 1 FROM bookings
+    WHERE asset_tag = NEW.asset_tag
+      AND booking_id != NEW.booking_id
+      AND (
+        status = 'confirmed'
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+      )
+      AND NEW.start_at_utc < end_at_utc
+      AND start_at_utc < NEW.end_at_utc
+  );
+END;
+```
+
+**Empirically verified**, same discipline as the rest of this ADR (5 scenarios, sequential — the state-machine logic doesn't need true concurrency to prove, only the underlying overlap/lock mechanics already proven above do):
+
+| Scenario | Result |
+|---|---|
+| A tentative hold past its `expires_at_utc` no longer blocks a new competing `INSERT` | ✅ new booking succeeds |
+| A tentative hold still within its deadline blocks a new competing `INSERT` | ✅ rejected, `overlapping active booking exists` |
+| Confirming an already-expired hold | ✅ rejected outright, `hold has expired` — never reaches the overlap check |
+| Confirming a still-valid, non-conflicting hold | ✅ succeeds, `status` becomes `confirmed` |
+| Confirming a hold whose slot was taken by someone else after it expired | ✅ rejected (via the expiry check — see note) |
+
+**Note on the overlap-check branch of the confirm trigger:** under the current design, it's currently unreachable in practice — the `INSERT` trigger already prevents any competing booking from ever coexisting with a still-valid tentative hold, so by the time a confirm attempt could collide with something else, the hold being confirmed has necessarily already expired (caught by the first `RAISE`, as in the table above). It's kept anyway, deliberately, as defense-in-depth: if a future change relaxes the `INSERT` trigger's blocking rule, this backstop still protects the confirm path independently, without anyone having to remember the connection between the two triggers. The exact boundary race (a confirm attempt and a competing insert arriving within the same instant as a hold's expiry) is deterministic-testable and is specified as its own test case in the Part 2 plan's task breakdown, to be written during implementation.
+
+**Release** (explicit early release of a still-tentative hold) needs no new trigger — `UPDATE bookings SET status='cancelled' WHERE booking_id=? AND status='tentative'` can only ever resolve a conflict, never create one. It needs an authorization check (proposed: the original requester, or anyone who could have confirmed it) but no concurrency protection beyond what SQLite's ordinary locking already gives a single-row `UPDATE`.
+
 ## Consequences
 
-- **Easier:** the overlap invariant can never be silently reintroduced by a future handler, admin script, or bug — it's enforced by the schema. Error handling is simple and precise (`SQLITE_CONSTRAINT_TRIGGER` vs. `SQLITE_BUSY` are different, catchable conditions). Availability reads are never blocked by a reservation write (WAL).
-- **Harder:** SQLite triggers are less visible/discoverable than application code to someone unfamiliar with the schema (mitigated by this ADR and a schema comment). The backfill is a new, one-time migration step that needs its own verification pass against the real data before Part 2 ships (same discipline Part 1 used: run against the full reseed, report any row that doesn't parse, don't weaken the rule to force it to pass).
+- **Easier:** the overlap invariant can never be silently reintroduced by a future handler, admin script, or bug — it's enforced by the schema. Error handling is simple and precise (`SQLITE_CONSTRAINT_TRIGGER` vs. `SQLITE_BUSY` are different, catchable conditions). Availability reads are never blocked by a reservation write (WAL). The tentative-hold lifecycle (expire, confirm, release) reuses the exact same mechanism — no second concurrency story to design or trust separately.
+- **Harder:** SQLite triggers are less visible/discoverable than application code to someone unfamiliar with the schema (mitigated by this ADR and a schema comment). The backfill is a new, one-time migration step that needs its own verification pass against the real data before Part 2 ships (same discipline Part 1 used: run against the full reseed, report any row that doesn't parse, don't weaken the rule to force it to pass). Two triggers (insert, confirm-update) now need to be kept in sync by hand if the blocking rule ever changes — both are in one place in this ADR specifically so that's one documented edit, not two independent discoveries.
+- **Scope:** the tentative-hold lifecycle resolution added two endpoints (confirm, release) and a lazy-expiration mechanism that weren't in the original Part 2 draft — called out explicitly in the Part 2 plan rather than absorbed silently, since it's materially more surface area than "just" `POST /api/reservations`.
 - **Revisit when:** moving to Postgres (replace the trigger with a native `EXCLUDE` constraint — don't port the trigger) or moving to multiple API instances/machines sharing one database (the SQLite file-lock story doesn't extend across machines; Postgres's does, which is itself a reason to prioritize that migration before any multi-instance deployment, not after).
