@@ -1,6 +1,6 @@
 # 01 — Trustworthy availability (Part 0 + Part 1)
 
-**Status:** draft
+**Status:** in-progress (all 6 required increments implemented and green; A1/A3/A5 assumptions and 5 security-review findings await your decision before this can be marked done)
 **Challenge part(s):** 0, 1
 **Backend:** Go (per [ADR 0001](../decisions/0001-choose-go-backend.md)). `backend-ts` still exists in the repo pending an explicit go-ahead to delete it; this plan does not touch it.
 
