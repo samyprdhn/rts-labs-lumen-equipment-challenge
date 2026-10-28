@@ -7,10 +7,41 @@ import (
 	"net/http"
 	"time"
 
+	"lumen/equipment-api/internal/auth"
 	"lumen/equipment-api/internal/availability"
 	"lumen/equipment-api/internal/db"
 	"lumen/equipment-api/internal/fleetcare"
 )
+
+// rateVisibleRoles may see daily_rate_usd - internal cost data that has no
+// business reason to reach a subcontractor (an outside company) or a role
+// whose job isn't managing the budget.
+var rateVisibleRoles = map[string]bool{"ops_director": true, "superintendent": true}
+
+// fullDetailRole reports whether role gets unredacted conflict detail
+// everywhere (ops_director only - NOT safety_manager, despite its
+// site_ids=["*"] in the data: that wildcard describes cert-oversight scope,
+// not booking-detail oversight).
+func fullDetailRole(role string) bool {
+	return role == "ops_director"
+}
+
+// siteMatchedRole reports whether role gets full conflict detail when the
+// conflict's site is in the user's own site_ids. subcontractor is
+// deliberately excluded: an outside company sees that equipment is busy,
+// never who/where, even at their own site.
+func siteMatchedRole(role string) bool {
+	return role == "superintendent" || role == "foreman"
+}
+
+func hasSite(siteIDs []string, siteID string) bool {
+	for _, s := range siteIDs {
+		if s == siteID {
+			return true
+		}
+	}
+	return false
+}
 
 // fleetCache holds FleetCare maintenance-window data. Nil until InitFleetCare
 // (or InitFleetCareWithFetcher, for tests) is called; see cmd/api/main.go.
@@ -40,6 +71,8 @@ func InitFleetCareWithFetcher(fetcher fleetcare.Fetcher, ttl, staleAfter time.Du
 // This increment is scoped to overlap/date-window correctness once a start
 // and end instant are in hand.
 func Availability(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r)
+
 	typ := r.URL.Query().Get("type")
 	queryStart, startOK := parseQueryTime(r.URL.Query().Get("start"))
 	queryEnd, endOK := parseQueryTime(r.URL.Query().Get("end"))
@@ -89,19 +122,32 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 			}
 			if conflict != nil {
 				bookingAvailable = false
-				conflictOut = map[string]any{
+				// Operator identity (name, phone, SSN fragment, DOB, ...) is
+				// never included here (A6) - Part 1 doesn't need it to answer
+				// "is it free", and it was the single largest PII leak found
+				// in the inherited code. If a future screen needs "who has
+				// it booked", that's a new, explicitly role-gated endpoint,
+				// not a reason to bring SELECT * back into this response.
+				full := map[string]any{
 					"booking_id": conflict.BookingID,
 					"site_id":    conflict.SiteID,
 					"start_at":   conflict.StartAt,
 					"end_at":     conflict.EndAt,
 					"status":     conflict.Status,
 				}
-				if conflict.OperatorID != "" {
-					orows, _ := db.DB.Query("SELECT * FROM operators WHERE operator_id = ?", conflict.OperatorID)
-					ops := scanAll(orows)
-					if len(ops) > 0 {
-						conflictOut["operator"] = ops[0]
-					}
+
+				// Redact site/time/booking detail unless the caller has a
+				// stated business reason to see it: ops_director always;
+				// superintendent/foreman only for a conflict at their own
+				// site. subcontractor and safety_manager never get full
+				// detail here, regardless of their site_ids (safety_manager's
+				// "*" describes cert-oversight scope, not booking oversight;
+				// subcontractor is an outside company). An unrecognized role
+				// falls through to the same redacted default.
+				if user != nil && (fullDetailRole(user.Role) || (siteMatchedRole(user.Role) && hasSite(user.SiteIDs, conflict.SiteID))) {
+					conflictOut = full
+				} else {
+					conflictOut = map[string]any{"exists": true}
 				}
 			}
 		}
@@ -118,6 +164,14 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 			maintenanceStatus, _ = fleetCache.Status(tag, time.Now(), queryStart, queryEnd)
 		}
 		availableOut := bookingAvailable && maintenanceStatus == "ok"
+
+		// daily_rate_usd is Lumen's internal cost data; it has no business
+		// reason to reach a subcontractor or any role outside the people who
+		// manage the budget (confirmed live, this engagement: it was
+		// leaking to every role, including outside companies).
+		if user == nil || !rateVisibleRoles[user.Role] {
+			delete(item, "daily_rate_usd")
+		}
 
 		item["available"] = availableOut
 		item["conflict"] = conflictOut

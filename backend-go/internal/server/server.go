@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 
 	"lumen/equipment-api/internal/auth"
+	"lumen/equipment-api/internal/config"
 	"lumen/equipment-api/internal/handlers"
 )
 
@@ -16,7 +17,8 @@ func New() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"ok":true}`))
 	})
-	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(http.HandlerFunc(handlers.Availability)))
+	jwtSecret := config.Get("JWT_SECRET", "")
+	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(jwtSecret, http.HandlerFunc(handlers.Availability)))
 
 	return cors(logRequests(recoverErrors(mux)))
 }

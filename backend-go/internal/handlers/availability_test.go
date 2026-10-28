@@ -49,9 +49,16 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// token signs claims exactly as scripts/dev-token.mjs does, including a
+// real exp claim - RequireAuth now verifies the signature and requires a
+// valid, unexpired exp, so a test fixture without one would be rejected,
+// correctly, but wouldn't be testing what these tests are meant to test.
 func token(claims map[string]any) string {
 	enc := base64.RawURLEncoding
 	h, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	if _, ok := claims["exp"]; !ok {
+		claims["exp"] = time.Now().Add(time.Hour).Unix()
+	}
 	p, _ := json.Marshal(claims)
 	unsigned := enc.EncodeToString(h) + "." + enc.EncodeToString(p)
 	mac := hmac.New(sha256.New, []byte(os.Getenv("JWT_SECRET")))
