@@ -2,10 +2,10 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"runtime/debug"
+	"strings"
 
 	"lumen/equipment-api/internal/auth"
 	"lumen/equipment-api/internal/config"
@@ -20,37 +20,83 @@ func New() http.Handler {
 	jwtSecret := config.Get("JWT_SECRET", "")
 	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(jwtSecret, http.HandlerFunc(handlers.Availability)))
 
-	return cors(logRequests(recoverErrors(mux)))
+	return Wrap(mux)
+}
+
+// Wrap applies the same middleware chain New() uses, so tests can exercise
+// cors/logRequests/recoverErrors against an arbitrary handler without
+// standing up the full route table.
+func Wrap(next http.Handler) http.Handler {
+	return cors(logRequests(recoverErrors(next)))
+}
+
+// allowedOrigins is a small, explicit allow-list rather than "*" - a
+// wildcard combined with Allow-Credentials is both an invalid combination
+// per the CORS spec and an unnecessary exposure. CORS_ALLOWED_ORIGINS is a
+// comma-separated override for other environments (e.g. a deployed
+// frontend origin); the dev server origin is the default.
+func allowedOrigins() []string {
+	raw := config.Get("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+	var out []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 func cors(next http.Handler) http.Handler {
+	allowed := allowedOrigins()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
+		origin := r.Header.Get("Origin")
+		for _, a := range allowed {
+			if origin == a {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				break
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// redactedHeaders returns r.Header with Authorization removed, for logging.
+// Request metadata (method, path, user agent, etc.) is useful for
+// debugging; the bearer token itself must never reach a log line.
+func redactedHeaders(h http.Header) http.Header {
+	out := make(http.Header, len(h))
+	for k, v := range h {
+		if strings.EqualFold(k, "Authorization") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h, _ := json.Marshal(r.Header)
-		log.Println(r.Method, r.URL.String(), string(h))
+		safe, _ := json.Marshal(redactedHeaders(r.Header))
+		log.Println(r.Method, r.URL.String(), string(safe))
 		next.ServeHTTP(w, r)
 	})
 }
 
+// recoverErrors turns a panic into a generic 500. The full error and stack
+// trace are logged server-side (never containing the Authorization header -
+// logRequests redacts it independently of this) but never sent to the
+// client; the inherited code returned both the raw error message and a
+// full stack trace in the response body.
 func recoverErrors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				log.Println(err)
+				log.Printf("panic handling %s %s: %v\n%s", r.Method, r.URL.String(), err, debug.Stack())
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error": fmt.Sprint(err),
-					"stack": string(debug.Stack()),
-				})
+				json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
 			}
 		}()
 		next.ServeHTTP(w, r)

@@ -22,3 +22,10 @@ Append entries with the `checkpoint` skill (or by hand). Newest at the bottom.
 - **Decisions / changes of direction:** the A5 prose corrections above; otherwise none beyond the approved plan.
 - **Next:** Increment 4 — API validation, actionable errors, and the remaining hygiene items (CORS, request-header logging, stack-trace leaks).
 - **Open questions / risks:** none new. A second token-exposure incident happened this increment (plain `go test ./...`, no `-v`, still printed a request-header log line via the app's own `log.Println`) — not caught by the `-v`-only caution learned last time. Fixed process going forward: always redirect backend-go test output to a file and grep safe patterns, not just avoid `-v`. This exact logging is also increment 4's step 5, so it's first on that list.
+
+## 2026-10-28 18:05 — Increment 4: API validation + actionable errors + hygiene
+- **Done:** `availability.go` returns `400` with an actionable message for missing/malformed `start`/`end` or `end <= start`, instead of silently showing everything as available. `server.go`: CORS is now an explicit allow-list (never wildcard+credentials), request logging redacts `Authorization`, and the panic handler returns a generic error to the client while still logging the full detail server-side. This is the fix for the exact logging line that leaked a token twice this engagement (increments 2 and 3) - it's gone now, not just avoided.
+- **Tests:** `go test ./...` (backend-go) — all packages `ok`. 11 new tests. Manually smoke-tested live against a dedicated-port instance (validation errors, CORS allow/deny).
+- **Decisions / changes of direction:** none beyond the approved plan.
+- **Next:** Increment 5 — frontend loading/empty/error/retry states.
+- **Open questions / risks:** none new.

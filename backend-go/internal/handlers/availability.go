@@ -77,6 +77,19 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 	queryStart, startOK := parseQueryTime(r.URL.Query().Get("start"))
 	queryEnd, endOK := parseQueryTime(r.URL.Query().Get("end"))
 
+	if !startOK {
+		writeError(w, http.StatusBadRequest, "start is required and must be an RFC3339 timestamp or YYYY-MM-DD date")
+		return
+	}
+	if !endOK {
+		writeError(w, http.StatusBadRequest, "end is required and must be an RFC3339 timestamp or YYYY-MM-DD date")
+		return
+	}
+	if !queryEnd.After(queryStart) {
+		writeError(w, http.StatusBadRequest, "end must be after start")
+		return
+	}
+
 	query := "SELECT * FROM equipment WHERE status = 'active'"
 	args := []any{}
 	if typ != "" {
@@ -185,6 +198,15 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 
 // parseQueryTime accepts a full RFC3339 timestamp or a plain "YYYY-MM-DD"
 // date (treated as UTC midnight). Interim, pending the validation increment.
+// writeError sends a consistent, actionable JSON error body. It never
+// includes internal detail (SQL, file paths, stack traces) - just enough
+// for a client to fix its request.
+func writeError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
 func parseQueryTime(raw string) (time.Time, bool) {
 	if raw == "" {
 		return time.Time{}, false
