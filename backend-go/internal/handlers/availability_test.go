@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,18 +10,42 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"lumen/equipment-api/internal/config"
 	"lumen/equipment-api/internal/db"
+	"lumen/equipment-api/internal/fleetcare"
+	"lumen/equipment-api/internal/handlers"
 	"lumen/equipment-api/internal/server"
 )
 
 // NOTE: requires `npm run seed` from the repo root first.
 
+// alwaysOKFetcher is the default FleetCare double for tests that don't care
+// about maintenance behavior: every asset comes back with zero windows, so
+// `available` reflects booking state alone, same as before FleetCare
+// integration existed. Tests that DO care about maintenance call
+// handlers.InitFleetCareWithFetcher themselves and restore this default via
+// t.Cleanup so test order never matters.
+type alwaysOKFetcher struct{}
+
+func (alwaysOKFetcher) FetchAll(ctx context.Context, tags []string) (map[string][]fleetcare.Window, error) {
+	out := map[string][]fleetcare.Window{}
+	for _, tag := range tags {
+		out[tag] = []fleetcare.Window{}
+	}
+	return out, nil
+}
+
+func resetFleetCareDefault() {
+	handlers.InitFleetCareWithFetcher(alwaysOKFetcher{}, time.Minute, time.Hour)
+}
+
 func TestMain(m *testing.M) {
 	os.Setenv("REPO_ROOT", "../../..")
 	config.LoadEnv()
 	db.Open()
+	resetFleetCareDefault()
 	os.Exit(m.Run())
 }
 

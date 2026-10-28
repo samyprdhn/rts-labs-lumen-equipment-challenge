@@ -9,7 +9,26 @@ import (
 
 	"lumen/equipment-api/internal/availability"
 	"lumen/equipment-api/internal/db"
+	"lumen/equipment-api/internal/fleetcare"
 )
+
+// fleetCache holds FleetCare maintenance-window data. Nil until InitFleetCare
+// (or InitFleetCareWithFetcher, for tests) is called; see cmd/api/main.go.
+var fleetCache *fleetcare.Cache
+
+// InitFleetCare wires a real FleetCare HTTP client into the handler. timeout
+// bounds each vendor call; ttl is how often a refresh is attempted; staleAfter
+// is how long previously-good data may be served before reading as unknown.
+func InitFleetCare(baseURL, apiKey string, timeout, ttl, staleAfter time.Duration) {
+	client := fleetcare.NewClient(baseURL, apiKey, timeout)
+	fleetCache = fleetcare.NewCache(client, ttl, staleAfter)
+}
+
+// InitFleetCareWithFetcher wires a caller-supplied fetcher (a test double,
+// typically) instead of a real HTTP client.
+func InitFleetCareWithFetcher(fetcher fleetcare.Fetcher, ttl, staleAfter time.Duration) {
+	fleetCache = fleetcare.NewCache(fetcher, ttl, staleAfter)
+}
 
 // GET /api/equipment/availability?type=mobile_crane&start=2026-10-13&end=2026-10-15
 //
@@ -51,13 +70,17 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 
 	siteTZ := loadSiteTimezones()
 
+	if fleetCache != nil && startOK && endOK {
+		fleetCache.EnsureFresh(r.Context(), equipmentTags, time.Now())
+	}
+
 	results := []map[string]any{}
 	for _, item := range equipment {
 		tag := asString(item["asset_tag"])
 		key := availability.NormalizeTag(tag)
 
 		var conflictOut map[string]any
-		availableOut := true
+		bookingAvailable := true
 
 		if startOK && endOK {
 			conflict, warnings := availability.FindConflict(index[key], siteTZ, queryStart, queryEnd)
@@ -65,7 +88,7 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 				log.Printf("availability: data quality warning: booking %s: %s", w.BookingID, w.Reason)
 			}
 			if conflict != nil {
-				availableOut = false
+				bookingAvailable = false
 				conflictOut = map[string]any{
 					"booking_id": conflict.BookingID,
 					"site_id":    conflict.SiteID,
@@ -83,10 +106,22 @@ func Availability(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// TODO(increment 2): fold FleetCare maintenance-window status into availableOut here.
+		// maintenanceStatus is "unknown" whenever fleetCache isn't wired up or
+		// the query window is unparsed - never silently "ok". available is a
+		// function of BOTH signals, not just bookings: this is the fix for the
+		// seam a prior review flagged as the one thing that could still make
+		// Dana's complaint ("looks free, isn't") recur through FleetCare
+		// specifically. No consumer can forget to check maintenance.status
+		// separately, because it's already folded into the one boolean.
+		maintenanceStatus := "unknown"
+		if fleetCache != nil && startOK && endOK {
+			maintenanceStatus, _ = fleetCache.Status(tag, time.Now(), queryStart, queryEnd)
+		}
+		availableOut := bookingAvailable && maintenanceStatus == "ok"
 
 		item["available"] = availableOut
 		item["conflict"] = conflictOut
+		item["maintenance"] = map[string]any{"status": maintenanceStatus}
 		results = append(results, item)
 	}
 
