@@ -64,3 +64,139 @@ func TestAvailabilityReturnsCranes(t *testing.T) {
 		}
 	}
 }
+
+// --- Increment 1 regression tests: overlap/date-window correctness ---
+// All use real seeded booking IDs from data/bookings.csv, confirmed against
+// this exact geometry in the live runtime-evidence pass earlier in this
+// engagement. Query windows are expressed in RFC3339/UTC to avoid ambiguity
+// about which timezone a bare query param means (that's formalized in the
+// API-validation increment); only the booking's own site timezone matters
+// for interpreting its stored naive timestamp.
+
+func queryAvailability(t *testing.T, qs string) []map[string]any {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/equipment/availability?"+qs, nil)
+	req.Header.Set("Authorization", "Bearer "+token(map[string]any{"sub": "u-ops-01", "role": "ops_director", "site_ids": []string{"*"}}))
+	rec := httptest.NewRecorder()
+	server.New().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	return body.Data
+}
+
+func findItem(t *testing.T, data []map[string]any, assetTag string) map[string]any {
+	t.Helper()
+	for _, item := range data {
+		if item["asset_tag"] == assetTag {
+			return item
+		}
+	}
+	t.Fatalf("asset_tag %q not found in response (%d items)", assetTag, len(data))
+	return nil
+}
+
+// Scenario 1 / 8: booking contained in query window (MC-007/BK-1119,
+// 2026-11-12 07:30-17:00 EST, confirmed) must conflict, tagged confirmed.
+func TestAvailability_BookingContainedInQuery(t *testing.T) {
+	data := queryAvailability(t, "type=mobile_crane&start=2026-11-10T00:00:00Z&end=2026-11-14T00:00:00Z")
+	mc007 := findItem(t, data, "MC-007")
+	if mc007["available"] != false {
+		t.Fatalf("MC-007 should be unavailable (BK-1119), got available=%v", mc007["available"])
+	}
+	conflict, _ := mc007["conflict"].(map[string]any)
+	if conflict == nil || conflict["booking_id"] != "BK-1119" || conflict["status"] != "confirmed" {
+		t.Fatalf("expected conflict BK-1119/confirmed, got %+v", conflict)
+	}
+}
+
+// Scenario 2: query contained in booking (MC-007/BK-1005, Nov15-25
+// confirmed) - this is the exact inherited bug. Must now conflict.
+func TestAvailability_QueryContainedInBooking(t *testing.T) {
+	data := queryAvailability(t, "type=mobile_crane&start=2026-11-20T00:00:00Z&end=2026-11-22T00:00:00Z")
+	mc007 := findItem(t, data, "MC-007")
+	if mc007["available"] != false {
+		t.Fatalf("MC-007 should be unavailable (BK-1005 spans the whole query window), got available=%v", mc007["available"])
+	}
+	conflict, _ := mc007["conflict"].(map[string]any)
+	if conflict == nil || conflict["booking_id"] != "BK-1005" {
+		t.Fatalf("expected conflict BK-1005, got %+v", conflict)
+	}
+}
+
+// Scenarios 3/4: partial overlap at either boundary must conflict.
+func TestAvailability_PartialOverlapBothSides(t *testing.T) {
+	left := queryAvailability(t, "type=mobile_crane&start=2026-11-12T00:00:00Z&end=2026-11-12T13:00:00Z")
+	if findItem(t, left, "MC-007")["available"] != false {
+		t.Fatal("partial overlap (query ends mid-booking) should conflict")
+	}
+	right := queryAvailability(t, "type=mobile_crane&start=2026-11-12T15:00:00Z&end=2026-11-12T23:59:00Z")
+	if findItem(t, right, "MC-007")["available"] != false {
+		t.Fatal("partial overlap (query starts mid-booking) should conflict")
+	}
+}
+
+// Scenarios 5/6: windows that merely touch a booking boundary must NOT conflict.
+func TestAvailability_AdjacentWindowsDoNotConflict(t *testing.T) {
+	before := queryAvailability(t, "type=mobile_crane&start=2026-11-12T00:00:00Z&end=2026-11-12T12:30:00Z")
+	if findItem(t, before, "MC-007")["available"] != true {
+		t.Fatal("a window ending exactly at booking start must not conflict")
+	}
+	after := queryAvailability(t, "type=mobile_crane&start=2026-11-12T22:00:00Z&end=2026-11-13T00:00:00Z")
+	if findItem(t, after, "MC-007")["available"] != true {
+		t.Fatal("a window starting exactly at booking end must not conflict")
+	}
+}
+
+// Scenario 7: a cancelled booking (MC-007/BK-1368, Nov1-6 2026) must never conflict.
+func TestAvailability_CancelledBookingNeverBlocks(t *testing.T) {
+	data := queryAvailability(t, "type=mobile_crane&start=2026-11-01T00:00:00Z&end=2026-11-07T00:00:00Z")
+	mc007 := findItem(t, data, "MC-007")
+	if mc007["available"] != true {
+		t.Fatalf("MC-007 should be available (BK-1368 is cancelled), got %+v", mc007["conflict"])
+	}
+}
+
+// Scenario 9: a tentative booking (MC-007/BK-1117, Jan1-3 2027) still blocks
+// today (A1's approved default), tagged tentative so a consumer can tell.
+func TestAvailability_TentativeBookingBlocksAndIsTagged(t *testing.T) {
+	data := queryAvailability(t, "type=mobile_crane&start=2027-01-01T00:00:00Z&end=2027-01-04T00:00:00Z")
+	mc007 := findItem(t, data, "MC-007")
+	if mc007["available"] != false {
+		t.Fatal("MC-007 should be unavailable (BK-1117, tentative)")
+	}
+	conflict, _ := mc007["conflict"].(map[string]any)
+	if conflict == nil || conflict["booking_id"] != "BK-1117" || conflict["status"] != "tentative" {
+		t.Fatalf("expected conflict BK-1117/tentative, got %+v", conflict)
+	}
+}
+
+// Scenario 15: a lowercase, mismatched asset_tag (mc-005/BK-1572) must still
+// correctly join and conflict, once normalized.
+func TestAvailability_LowercaseTagStillJoins(t *testing.T) {
+	data := queryAvailability(t, "type=mobile_crane&start=2026-12-16T00:00:00Z&end=2026-12-18T00:00:00Z")
+	mc005 := findItem(t, data, "MC-005")
+	if mc005["available"] != false {
+		t.Fatal("MC-005 should be unavailable (BK-1572, stored as 'mc-005')")
+	}
+	conflict, _ := mc005["conflict"].(map[string]any)
+	if conflict == nil || conflict["booking_id"] != "BK-1572" {
+		t.Fatalf("expected conflict BK-1572, got %+v", conflict)
+	}
+}
+
+// Scenario 22: retired equipment must never appear, regardless of the rewrite.
+func TestAvailability_RetiredEquipmentExcluded(t *testing.T) {
+	data := queryAvailability(t, "start=2026-10-01T00:00:00Z&end=2026-10-02T00:00:00Z")
+	for _, item := range data {
+		if item["asset_tag"] == "MC-008" || item["asset_tag"] == "SL-005" {
+			t.Fatalf("retired equipment %v must not appear in results", item["asset_tag"])
+		}
+	}
+}
