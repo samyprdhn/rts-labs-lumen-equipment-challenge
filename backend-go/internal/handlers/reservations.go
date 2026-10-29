@@ -319,12 +319,24 @@ func CreateReservation(w http.ResponseWriter, r *http.Request) {
 // reservationRow is the full row needed both to authorize a confirm/release
 // request (site_id, booked_by, status) and to render the response, so one
 // query serves both purposes.
+//
+// StartAtUTC/EndAtUTC are nullable: confirm/release must work on *any*
+// booking, including the 743 historical rows, which were deliberately
+// never backfilled against the developer's real working database (that
+// migration only ever ran against disposable test databases, per standing
+// instruction) - so a plain, non-nullable string here breaks with a Scan
+// error the first time this runs against real historical data, which none
+// of this feature's own tests caught, since they all build their database
+// through the backfill helper. StartAt/EndAt (the original, always-present
+// raw columns) are the fallback for display when the UTC columns are NULL.
 type reservationRow struct {
 	BookingID    string
 	AssetTag     string
 	SiteID       string
-	StartAtUTC   string
-	EndAtUTC     string
+	StartAt      string
+	EndAt        string
+	StartAtUTC   sql.NullString
+	EndAtUTC     sql.NullString
 	OperatorID   sql.NullString
 	BookedBy     string
 	Status       string
@@ -333,12 +345,12 @@ type reservationRow struct {
 
 func loadReservation(bookingID string) (*reservationRow, error) {
 	row := db.DB.QueryRow(
-		`SELECT booking_id, asset_tag, site_id, start_at_utc, end_at_utc, operator_id, booked_by, status, expires_at_utc
+		`SELECT booking_id, asset_tag, site_id, start_at, end_at, start_at_utc, end_at_utc, operator_id, booked_by, status, expires_at_utc
 		 FROM bookings WHERE booking_id = ?`,
 		bookingID,
 	)
 	var b reservationRow
-	err := row.Scan(&b.BookingID, &b.AssetTag, &b.SiteID, &b.StartAtUTC, &b.EndAtUTC, &b.OperatorID, &b.BookedBy, &b.Status, &b.ExpiresAtUTC)
+	err := row.Scan(&b.BookingID, &b.AssetTag, &b.SiteID, &b.StartAt, &b.EndAt, &b.StartAtUTC, &b.EndAtUTC, &b.OperatorID, &b.BookedBy, &b.Status, &b.ExpiresAtUTC)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -348,6 +360,17 @@ func loadReservation(bookingID string) (*reservationRow, error) {
 	return &b, nil
 }
 
+// displayTime prefers the canonical UTC value; falls back to the raw
+// (possibly non-UTC, possibly one of 4 mixed formats) column for a
+// not-yet-backfilled historical row, which is still more useful to a
+// caller than omitting the date entirely.
+func displayTime(utc sql.NullString, raw string) string {
+	if utc.Valid {
+		return utc.String
+	}
+	return raw
+}
+
 func writeReservationJSON(w http.ResponseWriter, status int, b *reservationRow) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -355,8 +378,8 @@ func writeReservationJSON(w http.ResponseWriter, status int, b *reservationRow) 
 		"booking_id":  b.BookingID,
 		"asset_tag":   b.AssetTag,
 		"site_id":     b.SiteID,
-		"start_at":    b.StartAtUTC,
-		"end_at":      b.EndAtUTC,
+		"start_at":    displayTime(b.StartAtUTC, b.StartAt),
+		"end_at":      displayTime(b.EndAtUTC, b.EndAt),
 		"status":      b.Status,
 		"operator_id": nullableString(b.OperatorID),
 		"expires_at":  nullableString(b.ExpiresAtUTC),

@@ -25,6 +25,7 @@ package handlers_test
 // | 16 | Boundary: confirm 1s before expiry | succeeds | same boundary, other side |
 // | 17 | No token | 401 for both | existing middleware |
 // | 18 | Successful confirm/release response includes the full reservation body | asset_tag/site_id/booked_by/operator_id present | response contract |
+// | 19 | Release a booking whose start_at_utc/end_at_utc are NULL (not yet backfilled - the real state of all 743 historical rows in the developer's working DB, which this migration deliberately never touches) | 200, response falls back to the raw start_at/end_at | found live against the real working DB: a non-nullable Go field Scan-erroring into a 500 for every historical booking, uncaught by every other test here because they all build their database through the backfill helper |
 //
 // Concurrency (real-process, real-HTTP) is covered separately in
 // backend-go/integration/, per the Part 3A precedent already set for create.
@@ -323,5 +324,43 @@ func TestConfirmReservation_ResponseBody(t *testing.T) {
 	data, _ := body["data"].(map[string]any)
 	if data["booking_id"] != id || data["asset_tag"] != asset || data["site_id"] != site || data["booked_by"] != "u-test-ops_director" {
 		t.Fatalf("expected full reservation body, got %+v", data)
+	}
+}
+
+// TestReleaseReservation_NotYetBackfilledHistoricalBooking reproduces the
+// real state of every historical row in the developer's actual working
+// database: start_at_utc/end_at_utc are NULL, because the backfill
+// migration deliberately only ever runs against disposable test databases
+// (standing instruction), never the real one. Found live: confirm/release
+// must still work against these rows, and didn't - every other test in
+// this file builds its fixtures with the UTC columns populated, so none of
+// them could have caught this.
+func TestReleaseReservation_NotYetBackfilledHistoricalBooking(t *testing.T) {
+	asset := "ZT" + nextTestID()
+	site := "ZS" + nextTestID()
+	id := "ZB" + nextTestID()
+	insertTestEquipment(t, asset, "active", "")
+	insertTestSite(t, site, "America/New_York")
+	// Mirrors the real historical data's raw format exactly (space-separated,
+	// no "Z") and leaves start_at_utc/end_at_utc unset (NULL) - no backfill.
+	_, err := db.DB.Exec(
+		`INSERT INTO bookings (booking_id, asset_tag, site_id, start_at, end_at, status, booked_by)
+		 VALUES (?, ?, ?, '2026-10-14 08:00', '2026-10-19 15:00', 'confirmed', 'u-test-ops_director')`,
+		id, asset, site,
+	)
+	if err != nil {
+		t.Fatalf("insert not-yet-backfilled booking: %v", err)
+	}
+
+	code, body := postAction(releasePath(id), tokenFor("ops_director", []string{"*"}))
+	if code != 200 {
+		t.Fatalf("expected 200, got %d: %+v", code, body)
+	}
+	data, _ := body["data"].(map[string]any)
+	if data["start_at"] != "2026-10-14 08:00" || data["end_at"] != "2026-10-19 15:00" {
+		t.Fatalf("expected the raw start_at/end_at as a fallback for NULL UTC columns, got %+v", data)
+	}
+	if data["status"] != "cancelled" {
+		t.Fatalf("expected status cancelled, got %+v", data)
 	}
 }
