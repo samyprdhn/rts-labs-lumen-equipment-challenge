@@ -54,8 +54,56 @@ CREATE TABLE bookings (
   operator_id TEXT,
   booked_by   TEXT,
   status      TEXT,
-  notes       TEXT
+  notes       TEXT,
+  -- Added for Part 2 (docs/decisions/0002-reservation-concurrency-control.md).
+  -- Additive, nullable: the original start_at/end_at columns are untouched
+  -- and keep their 4 mixed raw formats (see Part 1 recon). start_at_utc/
+  -- end_at_utc hold a canonical, strictly-sortable ISO-8601 UTC string -
+  -- the trigger below compares these, never the raw columns, because a raw
+  -- SQL string comparison across 4 incompatible formats would silently
+  -- reproduce the exact bug Part 1 fixed in application code. New rows
+  -- (created via POST /api/reservations) always populate these at insert
+  -- time. The 743 historical rows get them via a one-time backfill
+  -- (scripts/backfill_booking_utc.go) that reuses Part 1's already-proven
+  -- multi-format parser - NOT by this schema/seed script, since seed.mjs
+  -- loads the CSV columns verbatim and doesn't know these columns exist.
+  -- expires_at_utc is set only for a tentative hold (status='tentative');
+  -- NULL means "no expiry set" (confirmed bookings) or "not yet backfilled".
+  start_at_utc   TEXT,
+  end_at_utc     TEXT,
+  expires_at_utc TEXT
 );
+
+-- Enforces: no two active (confirmed, or tentative-and-not-yet-expired)
+-- bookings for the same asset may have overlapping [start_at_utc, end_at_utc)
+-- ranges. This is the schema-level backstop for the concurrency guarantee in
+-- docs/decisions/0002-reservation-concurrency-control.md - empirically
+-- verified there (10/10 concurrent trials) to hold even for a bare, naive
+-- INSERT with no application-level check at all.
+--
+-- Rows with NULL start_at_utc/end_at_utc (not yet backfilled, e.g. freshly
+-- seeded historical data before the backfill runs) never match the overlap
+-- comparison - SQL NULL comparisons are never true - so this trigger is
+-- inert for bulk-seeded historical rows until they're backfilled, and never
+-- rejects a seed load. It protects every row written through
+-- POST /api/reservations going forward, which always populates these
+-- columns at insert time.
+CREATE TRIGGER no_overlapping_active_bookings
+BEFORE INSERT ON bookings
+WHEN NEW.status IN ('confirmed', 'tentative')
+BEGIN
+  SELECT RAISE(ABORT, 'overlapping active booking exists')
+  WHERE EXISTS (
+    SELECT 1 FROM bookings
+    WHERE asset_tag = NEW.asset_tag
+      AND (
+        status = 'confirmed'
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+      )
+      AND NEW.start_at_utc < end_at_utc
+      AND start_at_utc < NEW.end_at_utc
+  );
+END;
 
 CREATE TABLE users (
   user_id  TEXT,

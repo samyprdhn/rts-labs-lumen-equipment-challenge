@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,8 +21,6 @@ import (
 	"lumen/equipment-api/internal/handlers"
 	"lumen/equipment-api/internal/server"
 )
-
-// NOTE: requires `npm run seed` from the repo root first.
 
 // alwaysOKFetcher is the default FleetCare double for tests that don't care
 // about maintenance behavior: every asset comes back with zero windows, so
@@ -50,10 +51,55 @@ func TestMain(m *testing.M) {
 	// shorter than 32 bytes, and RequireAuth now correctly refuses to
 	// start with it (see docs/reviews/2026-10-28-part1-auth-review.md).
 	os.Setenv("JWT_SECRET", "test-secret-for-handlers-tests-32-bytes-min")
+
+	// Part 1's tests were read-only against db/lumen.db, so sharing the
+	// developer's working database was safe. Part 2's reservation tests
+	// INSERT real rows and must never touch it. Every test in this
+	// package now runs against a fresh, disposable database built fresh
+	// per `go test` invocation.
+	dbPath, cleanup := newDisposableTestDB()
+	defer cleanup()
+	os.Setenv("DB_PATH", dbPath)
+
 	config.LoadEnv()
 	db.Open()
 	resetFleetCareDefault()
-	os.Exit(m.Run())
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
+}
+
+// newDisposableTestDB builds a throwaway SQLite database for this test run
+// only, by shelling out to the project's own seed script and UTC-backfill
+// tool rather than re-implementing CSV parsing or timezone conversion here -
+// the test database then matches exactly what a real deploy's migration
+// would produce, not a hand-rolled approximation of it.
+func newDisposableTestDB() (path string, cleanup func()) {
+	dir, err := os.MkdirTemp("", "lumen-handlers-test-db-")
+	if err != nil {
+		log.Fatalf("newDisposableTestDB: %v", err)
+	}
+	cleanup = func() { os.RemoveAll(dir) }
+	dbPath := filepath.Join(dir, "test.db")
+
+	// cwd for this test binary is backend-go/internal/handlers.
+	seed := exec.Command("node", "--no-warnings", "scripts/seed.mjs")
+	seed.Dir = "../../.." // repo root
+	seed.Env = append(os.Environ(), "DB_PATH="+dbPath)
+	if out, err := seed.CombinedOutput(); err != nil {
+		cleanup()
+		log.Fatalf("newDisposableTestDB: seeding failed: %v\n%s", err, out)
+	}
+
+	backfill := exec.Command("go", "run", "./cmd/backfill-booking-utc")
+	backfill.Dir = "../.." // backend-go module root
+	backfill.Env = append(os.Environ(), "DB_PATH="+dbPath)
+	if out, err := backfill.CombinedOutput(); err != nil {
+		cleanup()
+		log.Fatalf("newDisposableTestDB: backfill failed: %v\n%s", err, out)
+	}
+
+	return dbPath, cleanup
 }
 
 // token signs claims exactly as scripts/dev-token.mjs does, including

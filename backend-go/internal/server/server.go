@@ -23,11 +23,15 @@ func New() http.Handler {
 		Audience: config.Get("JWT_AUDIENCE", "lumen-equipment-api"),
 	}
 	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.Availability)))
+	mux.Handle("POST /api/reservations", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.CreateReservation)))
 	// A custom Authorization header always triggers a CORS preflight
 	// (it isn't a "simple" header per the Fetch spec); without an OPTIONS
-	// response the browser never sends the real GET at all. No auth here -
-	// preflight requests never carry credentials.
+	// response the browser never sends the real GET/POST at all. No auth
+	// here - preflight requests never carry credentials.
 	mux.HandleFunc("OPTIONS /api/equipment/availability", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("OPTIONS /api/reservations", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -38,7 +42,20 @@ func New() http.Handler {
 // cors/logRequests/recoverErrors against an arbitrary handler without
 // standing up the full route table.
 func Wrap(next http.Handler) http.Handler {
-	return cors(logRequests(recoverErrors(next)))
+	return cors(logRequests(recoverErrors(limitBody(next))))
+}
+
+// maxRequestBodyBytes bounds every request body, not just POST /api/reservations's -
+// unbounded by default, a client body is read entirely into memory by
+// json.Decode before any validation runs (docs/reviews/2026-10-28-part2-reservations.md).
+// 1 MiB is generously larger than any real request this API accepts.
+const maxRequestBodyBytes = 1 << 20
+
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // allowedOrigins is a small, explicit allow-list rather than "*" - a
@@ -66,7 +83,7 @@ func cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 				w.Header().Set("Access-Control-Max-Age", "600")
 				break
 			}

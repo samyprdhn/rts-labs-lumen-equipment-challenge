@@ -25,5 +25,19 @@ func main() {
 
 	port := config.Get("PORT", "8080")
 	log.Printf("Lumen equipment API (Go) listening on http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, server.New()))
+	// A bare http.ListenAndServe has no read/write/idle timeouts at all - a
+	// slow or stalled client can hold a goroutine open indefinitely
+	// (docs/reviews/2026-10-28-part2-reservations.md). Part 1 only served
+	// GET requests, so this went unnoticed; Part 2 adds the first endpoint
+	// that reads a client body, where it becomes worth fixing. The body
+	// size cap itself is enforced per-request in server.Wrap, not here.
+	httpServer := &http.Server{
+		Addr:              ":" + port,
+		Handler:           server.New(),
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(httpServer.ListenAndServe())
 }

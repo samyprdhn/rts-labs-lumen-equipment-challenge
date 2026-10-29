@@ -1,6 +1,6 @@
 # 02 — Reservations (Part 2)
 
-**Status:** draft — presenting for approval, nothing implemented yet. Revised after the tentative-hold lifecycle was resolved (was open question B2) — this added real scope (two new endpoints, an expiration mechanism) beyond the original draft; see the Status log.
+**Status:** `POST /api/reservations` (task 3) implemented, tested (unit + real-process concurrency), and security-reviewed. Confirm/release (task 4), idempotency (task 5), travel buffer (task 8), and the frontend form (task 9) remain approved in design but explicitly deferred — not implemented without separate approval, per instruction.
 **Challenge part(s):** 2
 **Depends on:** Part 1 ([01-trustworthy-availability.md](01-trustworthy-availability.md), status: done) for the overlap/date-parsing/authorization primitives this plan reuses. Concurrency mechanism: [ADR 0002](../decisions/0002-reservation-concurrency-control.md).
 
@@ -142,3 +142,4 @@ A second, equally deterministic test for the confirm path: one tentative hold wi
 ## Status log
 - 2026-10-28: created, presented for approval. Nothing implemented.
 - 2026-10-28: revised — B2 resolved by explicit stakeholder instruction (tentative holds protect, expire, and convert via an atomically-enforced confirm). Added: `expires_at_utc` column, a second (`BEFORE UPDATE`) trigger, two new endpoints (confirm, release), B6 (new assumption), and corresponding tasks/tests. Empirically verified the extended trigger design (5 sequential scenarios) the same way the original was verified. Still nothing implemented; re-presenting for approval with the larger scope made explicit rather than absorbed quietly.
+- 2026-10-28: task 1 (schema migration + backfill) and task 3 (`POST /api/reservations`, create only) implemented and verified: 59 unit-level handler tests, a deliberate-break regression-detection proof, a full historical-reseed re-verification against a disposable DB, and real concurrent-HTTP integration tests against the actual `cmd/api` binary (not `httptest`) proving exactly one winner across 5 trials of 20 simultaneous requests, plus disjoint-same-asset and overlapping-different-asset cases. `security-review` found and fixed one Medium finding (no request body size limit/HTTP timeouts) - see `docs/reviews/2026-10-28-part2-reservations.md`. Tasks 2 (cert parsing) landed as part of task 3, not separately. Tasks 4/5/8/9 (confirm, release, idempotency, travel buffer, frontend form) remain not implemented, per instruction. See `docs/plan/PROGRESS.md` for full detail.

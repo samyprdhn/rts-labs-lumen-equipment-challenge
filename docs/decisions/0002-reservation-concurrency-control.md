@@ -1,7 +1,7 @@
 # 0002 — Reservation concurrency control (no two overlapping bookings ever both commit)
 
-- **Status:** proposed
-- **Date:** 2026-10-28 (revised same day — tentative-hold lifecycle resolved, see "Tentative-hold lifecycle" below)
+- **Status:** accepted
+- **Date:** 2026-10-28 (revised same day — tentative-hold lifecycle resolved, see "Tentative-hold lifecycle" below; accepted for implementation same day, scoped to `POST /api/reservations` only — the confirm/release endpoints and their `BEFORE UPDATE` trigger are approved in design but explicitly deferred to a separate implementation pass, not built in this one)
 
 ## Context
 
