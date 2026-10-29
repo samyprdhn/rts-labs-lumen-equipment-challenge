@@ -34,6 +34,9 @@ export default function App() {
   const [bookingError, setBookingError] = useState("");
   const [bookingPending, setBookingPending] = useState(false);
   const [bookingNotice, setBookingNotice] = useState("");
+  const [releasingID, setReleasingID] = useState<string | null>(null);
+  const [releaseError, setReleaseError] = useState<{ id: string; message: string } | null>(null);
+  const [releaseNotice, setReleaseNotice] = useState("");
 
   useEffect(() => {
     if (!token) return;
@@ -153,6 +156,44 @@ export default function App() {
     }
   }
 
+  // A reservation's owner, or anyone with B1-level booking authority at its
+  // site, may release it (B6 - enforced server-side; this UI just offers
+  // the action to everyone who can see the booking_id in the first place,
+  // same as the "Book" button doesn't pre-filter by role either).
+  async function releaseReservation(bookingID: string) {
+    setReleasingID(bookingID);
+    setReleaseError(null);
+    setReleaseNotice("");
+    try {
+      const response = await fetch(`/api/reservations/${bookingID}/release`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await response.json().catch(() => ({}));
+
+      if (response.status === 200) {
+        setReleaseNotice(`Reservation ${bookingID} released. Availability is refreshing.`);
+        setRetryNonce((nonce) => nonce + 1);
+        return;
+      }
+      if (response.status === 403) {
+        setReleaseError({ id: bookingID, message: "You don't have permission to release this reservation." });
+      } else if (response.status === 404) {
+        setReleaseError({ id: bookingID, message: "Reservation not found - it may already be resolved." });
+      } else if (response.status === 409) {
+        setReleaseError({ id: bookingID, message: body?.error || "This reservation can't be released right now." });
+      } else if (response.status === 503) {
+        setReleaseError({ id: bookingID, message: "The release service is temporarily busy. Please try again." });
+      } else {
+        setReleaseError({ id: bookingID, message: body?.error || `Release failed (${response.status}).` });
+      }
+    } catch {
+      setReleaseError({ id: bookingID, message: "Could not reach the server. Check your connection and try again." });
+    } finally {
+      setReleasingID(null);
+    }
+  }
+
   if (!token) {
     return (
       <div className="login">
@@ -203,6 +244,7 @@ export default function App() {
       )}
 
       {bookingNotice && <div className="status-message" role="status">{bookingNotice}</div>}
+      {releaseNotice && <div className="status-message" role="status">{releaseNotice}</div>}
 
       {state === "success" && items.length === 0 && (
         <div className="status-message">No equipment matches these filters.</div>
@@ -246,6 +288,22 @@ export default function App() {
                   <button type="button" className="btn" onClick={() => openBooking(item)}>
                     Book {item.asset_tag}
                   </button>
+                </div>
+              )}
+
+              {item.conflict && item.conflict.booking_id && (item.conflict.status === "tentative" || item.conflict.status === "confirmed") && (
+                <div className="card-actions">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={releasingID === item.conflict.booking_id}
+                    onClick={() => releaseReservation(item.conflict.booking_id)}
+                  >
+                    {releasingID === item.conflict.booking_id ? "Releasing…" : `Release ${item.conflict.booking_id}`}
+                  </button>
+                  {releaseError && releaseError.id === item.conflict.booking_id && (
+                    <div className="status-message status-error" role="alert">{releaseError.message}</div>
+                  )}
                 </div>
               )}
 
