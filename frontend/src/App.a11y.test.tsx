@@ -40,7 +40,7 @@ describe("accessibility and mobile usability", () => {
     await screen.findByText("MC-001");
 
     expect(screen.getByRole("button", { name: /log out/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /MC-001/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /MC-001, available/ })).toBeTruthy();
   });
 
   // Scenario 3: filter controls must be labeled, not bare inputs.
