@@ -62,6 +62,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -283,6 +284,64 @@ func fireConcurrently(baseURL string, bodies []map[string]any) []reservationResu
 	return results
 }
 
+// insertBooking writes a booking row directly into the disposable DB,
+// bypassing the create endpoint - used to set up confirm/release scenarios
+// at a known starting state without depending on create's own behavior.
+func insertBooking(t *testing.T, db *sql.DB, bookingID, assetTag, siteID, status, expiresAtUTC string) {
+	t.Helper()
+	start := time.Date(2027, 9, 1, 8, 0, 0, 0, time.UTC)
+	end := start.Add(8 * time.Hour)
+	var exp any
+	if expiresAtUTC != "" {
+		exp = expiresAtUTC
+	}
+	_, err := db.Exec(
+		`INSERT INTO bookings (booking_id, asset_tag, site_id, start_at, end_at, status, booked_by, start_at_utc, end_at_utc, expires_at_utc)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		bookingID, assetTag, siteID, start.Format(time.RFC3339), end.Format(time.RFC3339), status, "u-integration-test",
+		start.Format(time.RFC3339), end.Format(time.RFC3339), exp,
+	)
+	if err != nil {
+		t.Fatalf("insertBooking(%s): %v", bookingID, err)
+	}
+}
+
+func postAction(baseURL, path string) reservationResult {
+	req, err := http.NewRequest("POST", baseURL+path, nil)
+	if err != nil {
+		return reservationResult{err: err}
+	}
+	req.Header.Set("Authorization", "Bearer "+opsDirectorToken())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return reservationResult{err: err}
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return reservationResult{status: resp.StatusCode, body: string(data)}
+}
+
+// fireActionsConcurrently is fireConcurrently's counterpart for no-body
+// POST actions (confirm/release), released at the same instant via the
+// same start-barrier pattern.
+func fireActionsConcurrently(baseURL string, paths []string) []reservationResult {
+	results := make([]reservationResult, len(paths))
+	var start sync.WaitGroup
+	start.Add(1)
+	var done sync.WaitGroup
+	for i, p := range paths {
+		done.Add(1)
+		go func(i int, p string) {
+			defer done.Done()
+			start.Wait()
+			results[i] = postAction(baseURL, p)
+		}(i, p)
+	}
+	start.Done()
+	done.Wait()
+	return results
+}
+
 func countStatuses(results []reservationResult) (ok, conflict, other int) {
 	for _, r := range results {
 		switch {
@@ -440,4 +499,154 @@ func TestReservationConcurrency_OverlappingDifferentAssets_AllSucceed(t *testing
 		}
 		t.Fatalf("expected all %d requests to succeed (same window, different assets), got ok=%d conflict=%d other=%d", n, ok, conflict, other)
 	}
+}
+
+// TestReservationConcurrency_ConfirmingExpiredHold_AllRejected is the
+// confirm-path counterpart to the create-path proof above: N genuinely
+// concurrent confirm attempts against the same already-expired tentative
+// hold must all fail with "hold has expired," and the row's status must
+// never change (no attempt can ever succeed, since the hold was already
+// expired before any of them started).
+func TestReservationConcurrency_ConfirmingExpiredHold_AllRejected(t *testing.T) {
+	dbPath, cleanupDB := buildDisposableDB(t)
+	defer cleanupDB()
+
+	port := freePort(t)
+	srv := startServer(t, dbPath, port)
+	waitHealthy(t, srv.baseURL)
+
+	directDB := openDirectDB(t, dbPath)
+
+	const n = 20
+	for trial := 0; trial < 3; trial++ {
+		asset := fmt.Sprintf("ZEXPCONF%d", trial)
+		site := fmt.Sprintf("ZEXPSITE%d", trial)
+		bookingID := fmt.Sprintf("ZEXPBK%d", trial)
+		insertEquipment(t, directDB, asset)
+		insertSite(t, directDB, site)
+		insertBooking(t, directDB, bookingID, asset, site, "tentative", time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
+
+		paths := make([]string, n)
+		for i := range paths {
+			paths[i] = "/api/reservations/" + bookingID + "/confirm"
+		}
+
+		results := fireActionsConcurrently(srv.baseURL, paths)
+		var ok, expired, other int
+		for _, r := range results {
+			switch {
+			case r.err != nil:
+				other++
+			case r.status == 200:
+				ok++
+			case r.status == 409 && strings.Contains(r.body, "hold has expired"):
+				expired++
+			default:
+				other++
+			}
+		}
+
+		t.Logf("trial %d: n=%d ok=%d expired_409=%d other=%d", trial, n, ok, expired, other)
+		if ok != 0 {
+			t.Fatalf("trial %d: expected zero successful confirms of an already-expired hold, got %d", trial, ok)
+		}
+		if other != 0 {
+			for i, r := range results {
+				if r.err != nil || r.status != 409 {
+					t.Logf("trial %d: unexpected result[%d]: status=%d err=%v body=%s", trial, i, r.status, r.err, r.body)
+				}
+			}
+			t.Fatalf("trial %d: expected every attempt to be a 409 \"hold has expired\", got %d other", trial, other)
+		}
+		if expired != n {
+			t.Fatalf("trial %d: expected all %d attempts to get \"hold has expired\", got %d", trial, n, expired)
+		}
+
+		var status string
+		if err := directDB.QueryRow("SELECT status FROM bookings WHERE booking_id = ?", bookingID).Scan(&status); err != nil {
+			t.Fatalf("trial %d: checking final status: %v", trial, err)
+		}
+		if status != "tentative" {
+			t.Fatalf("trial %d: expected the hold's status to remain 'tentative' (no confirm could ever have succeeded), got %q", trial, status)
+		}
+	}
+}
+
+// TestReservationConcurrency_ReleaseVsConfirmRace exercises C5 from
+// docs/plan/03-confirm-release.md directly: a release and a confirm firing
+// at the same instant on the same still-valid tentative hold. Worked out
+// by hand before writing this test (see the plan): release's precondition
+// (tentative OR confirmed) is a superset of confirm's (tentative only), so
+// release can always apply regardless of which request the write lock
+// favors - the two possible orderings are:
+//   - confirm wins the lock first: confirm -> 200 "confirmed", then
+//     release still matches (status is now 'confirmed') -> 200 "cancelled"
+//   - release wins the lock first: release -> 200 "cancelled", then
+//     confirm's WHERE no longer matches (status is now 'cancelled') ->
+//     409 "reservation is already cancelled" (this is also what proves the
+//     currentStatus() re-read fix: a stale pre-read would have said
+//     "already tentative", which is nonsense for a confirm request)
+//
+// In both orderings, the final state is deterministically 'cancelled' and
+// release always succeeds - this test asserts exactly that invariant,
+// rather than asserting one specific ordering actually occurred (goroutine
+// scheduling decides which order happens on which run).
+func TestReservationConcurrency_ReleaseVsConfirmRace(t *testing.T) {
+	dbPath, cleanupDB := buildDisposableDB(t)
+	defer cleanupDB()
+
+	port := freePort(t)
+	srv := startServer(t, dbPath, port)
+	waitHealthy(t, srv.baseURL)
+
+	directDB := openDirectDB(t, dbPath)
+
+	confirmFirstOrderingSeen := false
+	releaseFirstOrderingSeen := false
+
+	const trials = 10
+	for trial := 0; trial < trials; trial++ {
+		asset := fmt.Sprintf("ZRACE%d", trial)
+		site := fmt.Sprintf("ZRACESITE%d", trial)
+		bookingID := fmt.Sprintf("ZRACEBK%d", trial)
+		insertEquipment(t, directDB, asset)
+		insertSite(t, directDB, site)
+		insertBooking(t, directDB, bookingID, asset, site, "tentative", time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+
+		results := fireActionsConcurrently(srv.baseURL, []string{
+			"/api/reservations/" + bookingID + "/confirm",
+			"/api/reservations/" + bookingID + "/release",
+		})
+		confirmResult, releaseResult := results[0], results[1]
+
+		if confirmResult.err != nil || releaseResult.err != nil {
+			t.Fatalf("trial %d: unexpected transport error: confirm=%v release=%v", trial, confirmResult.err, releaseResult.err)
+		}
+		if releaseResult.status != 200 {
+			t.Fatalf("trial %d: expected release to always succeed (its precondition is a superset of confirm's), got %d: %s", trial, releaseResult.status, releaseResult.body)
+		}
+
+		switch confirmResult.status {
+		case 200:
+			confirmFirstOrderingSeen = true
+		case 409:
+			if !strings.Contains(confirmResult.body, "already cancelled") {
+				t.Fatalf("trial %d: confirm lost the race but got an unexpected message (stale-pre-read bug?): %s", trial, confirmResult.body)
+			}
+			releaseFirstOrderingSeen = true
+		default:
+			t.Fatalf("trial %d: confirm got an unexpected status %d: %s", trial, confirmResult.status, confirmResult.body)
+		}
+
+		var finalStatus string
+		if err := directDB.QueryRow("SELECT status FROM bookings WHERE booking_id = ?", bookingID).Scan(&finalStatus); err != nil {
+			t.Fatalf("trial %d: checking final status: %v", trial, err)
+		}
+		if finalStatus != "cancelled" {
+			t.Fatalf("trial %d: expected the deterministic final state to be 'cancelled' regardless of ordering, got %q", trial, finalStatus)
+		}
+		t.Logf("trial %d: confirm=%d release=%d final=%s", trial, confirmResult.status, releaseResult.status, finalStatus)
+	}
+
+	t.Logf("orderings observed across %d trials: confirm-first=%v release-first=%v", trials, confirmFirstOrderingSeen, releaseFirstOrderingSeen)
 }

@@ -490,10 +490,21 @@ func ConfirmReservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rows == 0 {
-		// Matched our pre-read a moment ago, but the status has since
-		// changed (a race) - the pre-read status is a moment stale, but
-		// still the right class of answer: "not tentative anymore."
-		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", booking.Status))
+		// Matched our pre-read a moment ago, but something else changed the
+		// row's status in between (a race). The pre-read status can't be
+		// trusted here - it may be the *exact* status we're transitioning
+		// from (reporting "already tentative" while confirming a tentative
+		// hold would be nonsense, not just stale) - so re-read the current
+		// status inside this same transaction, which sees it accurately:
+		// our BEGIN IMMEDIATE only proceeds once every prior writer has
+		// committed and released the lock.
+		current, csErr := currentStatus(ctx, conn, bookingID)
+		if csErr != nil {
+			log.Printf("reservations: confirm re-reading status: %v", csErr)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", current))
 		return
 	}
 
@@ -510,6 +521,16 @@ func ConfirmReservation(w http.ResponseWriter, r *http.Request) {
 
 	booking.Status = "confirmed"
 	writeReservationJSON(w, http.StatusOK, booking)
+}
+
+// currentStatus re-reads a booking's status via the same connection/
+// transaction a caller is already holding the write lock on, so it reflects
+// whatever the last writer actually committed - unlike a stale pre-read
+// taken before that lock was acquired.
+func currentStatus(ctx context.Context, conn *sql.Conn, bookingID string) (string, error) {
+	var status string
+	err := conn.QueryRowContext(ctx, "SELECT status FROM bookings WHERE booking_id = ?", bookingID).Scan(&status)
+	return status, err
 }
 
 // POST /api/reservations/{id}/release
@@ -573,7 +594,13 @@ func ReleaseReservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rows == 0 {
-		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", booking.Status))
+		// Unlike confirm's 0-rows case, this one doesn't need a re-read to
+		// be accurate: the UPDATE's own WHERE clause already covers both
+		// statuses this handler accepts (tentative, confirmed), and
+		// 'cancelled' is the only third status this system ever writes -
+		// so 0 rows affected here can only mean one thing, correctly,
+		// regardless of what the pre-read saw a moment ago.
+		writeError(w, http.StatusConflict, "reservation is already cancelled")
 		return
 	}
 
