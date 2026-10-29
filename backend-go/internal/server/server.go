@@ -24,14 +24,25 @@ func New() http.Handler {
 	}
 	mux.Handle("GET /api/equipment/availability", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.Availability)))
 	mux.Handle("POST /api/reservations", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.CreateReservation)))
+	mux.Handle("POST /api/reservations/{id}/confirm", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.ConfirmReservation)))
+	mux.Handle("POST /api/reservations/{id}/release", auth.RequireAuth(authCfg, http.HandlerFunc(handlers.ReleaseReservation)))
 	// A custom Authorization header always triggers a CORS preflight
 	// (it isn't a "simple" header per the Fetch spec); without an OPTIONS
 	// response the browser never sends the real GET/POST at all. No auth
-	// here - preflight requests never carry credentials.
+	// here - preflight requests never carry credentials. Go 1.22's
+	// ServeMux matches each pattern independently, so a sub-path needs its
+	// own OPTIONS route - the existing "/api/reservations" one doesn't
+	// cover "/api/reservations/{id}/confirm".
 	mux.HandleFunc("OPTIONS /api/equipment/availability", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("OPTIONS /api/reservations", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("OPTIONS /api/reservations/{id}/confirm", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("OPTIONS /api/reservations/{id}/release", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 

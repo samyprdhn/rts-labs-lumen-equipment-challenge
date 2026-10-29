@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	sqlite3 "modernc.org/sqlite"
@@ -21,13 +22,11 @@ import (
 	"lumen/equipment-api/internal/db"
 )
 
-// This file implements only POST /api/reservations (docs/plan/02-reservations.md,
-// docs/decisions/0002-reservation-concurrency-control.md). The confirm and
-// release endpoints, and the idempotency-key table (plan tasks 4 and 5), are
-// approved in design but deliberately NOT built here - a separate pass, per
-// instruction. A reservation created here can be "tentative" or "confirmed"
-// (per the approved lifecycle), but nothing in this file can transition one
-// afterward.
+// This file implements POST /api/reservations (docs/plan/02-reservations.md,
+// docs/decisions/0002-reservation-concurrency-control.md) and the confirm/
+// release status transitions (docs/plan/03-confirm-release.md). The
+// idempotency-key table (plan task 5) and the travel buffer are still
+// deliberately not built - a separate pass, per instruction.
 
 type createReservationRequest struct {
 	AssetTag   string `json:"asset_tag"`
@@ -315,6 +314,282 @@ func CreateReservation(w http.ResponseWriter, r *http.Request) {
 		"booked_by":   user.Sub,
 		"created_at":  nowUTC.Format(time.RFC3339),
 	}})
+}
+
+// reservationRow is the full row needed both to authorize a confirm/release
+// request (site_id, booked_by, status) and to render the response, so one
+// query serves both purposes.
+type reservationRow struct {
+	BookingID    string
+	AssetTag     string
+	SiteID       string
+	StartAtUTC   string
+	EndAtUTC     string
+	OperatorID   sql.NullString
+	BookedBy     string
+	Status       string
+	ExpiresAtUTC sql.NullString
+}
+
+func loadReservation(bookingID string) (*reservationRow, error) {
+	row := db.DB.QueryRow(
+		`SELECT booking_id, asset_tag, site_id, start_at_utc, end_at_utc, operator_id, booked_by, status, expires_at_utc
+		 FROM bookings WHERE booking_id = ?`,
+		bookingID,
+	)
+	var b reservationRow
+	err := row.Scan(&b.BookingID, &b.AssetTag, &b.SiteID, &b.StartAtUTC, &b.EndAtUTC, &b.OperatorID, &b.BookedBy, &b.Status, &b.ExpiresAtUTC)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func writeReservationJSON(w http.ResponseWriter, status int, b *reservationRow) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+		"booking_id":  b.BookingID,
+		"asset_tag":   b.AssetTag,
+		"site_id":     b.SiteID,
+		"start_at":    b.StartAtUTC,
+		"end_at":      b.EndAtUTC,
+		"status":      b.Status,
+		"operator_id": nullableString(b.OperatorID),
+		"expires_at":  nullableString(b.ExpiresAtUTC),
+		"booked_by":   b.BookedBy,
+	}})
+}
+
+// canManageBooking implements B6 (docs/plan/02-reservations.md, generalized
+// to confirmed bookings in docs/plan/03-confirm-release.md's C1): the
+// original requester, or anyone with B1-level booking authority at the
+// booking's site. Applies identically to confirm and release, and to a
+// tentative or confirmed starting status - no source material argues for
+// treating the two differently.
+func canManageBooking(user *auth.User, b *reservationRow) bool {
+	if user.Sub == b.BookedBy {
+		return true
+	}
+	switch user.Role {
+	case "ops_director":
+		return true
+	case "superintendent", "foreman":
+		return user.CanAccessSite(b.SiteID)
+	}
+	return false
+}
+
+// beginReservationTx opens the same BEGIN IMMEDIATE transaction pattern
+// CreateReservation uses - a raw *sql.Conn, not database/sql's Tx wrapper -
+// so SQLITE_BUSY/SQLITE_CONSTRAINT_TRIGGER surface the same way for every
+// write path in this file. The caller must call the returned rollback func
+// (a no-op once committed has been set true) and conn.Close() via defer.
+func beginReservationTx(ctx context.Context, w http.ResponseWriter) (conn *sql.Conn, rollback func(committed *bool), ok bool) {
+	conn, err := db.DB.Conn(ctx)
+	if err != nil {
+		log.Printf("reservations: acquiring connection: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return nil, nil, false
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		conn.Close()
+		if isBusy(err) {
+			writeBusy(w)
+			return nil, nil, false
+		}
+		log.Printf("reservations: BEGIN IMMEDIATE: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return nil, nil, false
+	}
+	rollback = func(committed *bool) {
+		if !*committed {
+			if _, rbErr := conn.ExecContext(context.Background(), "ROLLBACK"); rbErr != nil {
+				log.Printf("reservations: rollback: %v", rbErr)
+			}
+		}
+	}
+	return conn, rollback, true
+}
+
+// POST /api/reservations/{id}/confirm
+//
+// tentative -> confirmed, backstopped by the no_overlap_on_confirm trigger
+// (db/schema.sql). Order: load the booking (404 if it doesn't exist) ->
+// authorize (B6) -> reject if it isn't currently tentative (409) -> only
+// then open the transaction for the actual UPDATE.
+func ConfirmReservation(w http.ResponseWriter, r *http.Request) {
+	bookingID := r.PathValue("id")
+	user := auth.UserFrom(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	booking, err := loadReservation(bookingID)
+	if err != nil {
+		log.Printf("reservations: loading booking for confirm: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if booking == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("unknown booking_id %q", bookingID))
+		return
+	}
+	if !canManageBooking(user, booking) {
+		writeError(w, http.StatusForbidden, "not authorized to confirm this reservation")
+		return
+	}
+	if booking.Status != "tentative" {
+		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", booking.Status))
+		return
+	}
+
+	ctx := r.Context()
+	conn, rollback, ok := beginReservationTx(ctx, w)
+	if !ok {
+		return
+	}
+	defer conn.Close()
+	committed := false
+	defer func() { rollback(&committed) }()
+
+	result, err := conn.ExecContext(ctx, "UPDATE bookings SET status='confirmed' WHERE booking_id=? AND status='tentative'", bookingID)
+	if err != nil {
+		var sqliteErr *sqlite3.Error
+		if errors.As(err, &sqliteErr) {
+			switch sqliteErr.Code() {
+			case sqlite3lib.SQLITE_CONSTRAINT_TRIGGER:
+				// The two RAISEs in no_overlap_on_confirm are distinguished
+				// by message text - this is the only way to tell "the hold
+				// you're confirming has expired" from "someone else has the
+				// slot now" apart, and the caller needs to know which.
+				if strings.Contains(sqliteErr.Error(), "hold has expired") {
+					writeError(w, http.StatusConflict, "hold has expired")
+				} else {
+					writeError(w, http.StatusConflict, "conflict")
+				}
+				return
+			case sqlite3lib.SQLITE_BUSY:
+				writeBusy(w)
+				return
+			}
+		}
+		log.Printf("reservations: confirm update failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("reservations: confirm rows affected: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if rows == 0 {
+		// Matched our pre-read a moment ago, but the status has since
+		// changed (a race) - the pre-read status is a moment stale, but
+		// still the right class of answer: "not tentative anymore."
+		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", booking.Status))
+		return
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		if isBusy(err) {
+			writeBusy(w)
+			return
+		}
+		log.Printf("reservations: confirm commit failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	committed = true
+
+	booking.Status = "confirmed"
+	writeReservationJSON(w, http.StatusOK, booking)
+}
+
+// POST /api/reservations/{id}/release
+//
+// tentative -> cancelled, or confirmed -> cancelled (generalized from the
+// original tentative-only design, docs/plan/03-confirm-release.md). No new
+// trigger: cancelling can only ever free a slot, never create a conflict
+// with anything else (ADR 0002).
+func ReleaseReservation(w http.ResponseWriter, r *http.Request) {
+	bookingID := r.PathValue("id")
+	user := auth.UserFrom(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	booking, err := loadReservation(bookingID)
+	if err != nil {
+		log.Printf("reservations: loading booking for release: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if booking == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("unknown booking_id %q", bookingID))
+		return
+	}
+	if !canManageBooking(user, booking) {
+		writeError(w, http.StatusForbidden, "not authorized to release this reservation")
+		return
+	}
+	if booking.Status != "tentative" && booking.Status != "confirmed" {
+		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", booking.Status))
+		return
+	}
+
+	ctx := r.Context()
+	conn, rollback, ok := beginReservationTx(ctx, w)
+	if !ok {
+		return
+	}
+	defer conn.Close()
+	committed := false
+	defer func() { rollback(&committed) }()
+
+	result, err := conn.ExecContext(ctx,
+		"UPDATE bookings SET status='cancelled' WHERE booking_id=? AND status IN ('tentative','confirmed')", bookingID)
+	if err != nil {
+		if isBusy(err) {
+			writeBusy(w)
+			return
+		}
+		log.Printf("reservations: release update failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("reservations: release rows affected: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if rows == 0 {
+		writeError(w, http.StatusConflict, fmt.Sprintf("reservation is already %s", booking.Status))
+		return
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		if isBusy(err) {
+			writeBusy(w)
+			return
+		}
+		log.Printf("reservations: release commit failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	committed = true
+
+	booking.Status = "cancelled"
+	writeReservationJSON(w, http.StatusOK, booking)
 }
 
 // findActiveConflict runs, inside the caller's transaction, the exact same

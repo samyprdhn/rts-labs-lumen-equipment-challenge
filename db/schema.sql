@@ -119,6 +119,42 @@ BEGIN
   );
 END;
 
+-- Backstop for confirming a tentative hold (docs/plan/03-confirm-release.md,
+-- ADR 0002's "Tentative-hold lifecycle" section). A BEFORE INSERT trigger
+-- never sees an UPDATE, so confirming needs its own trigger. Two RAISEs,
+-- checked in order:
+--   1. The hold being confirmed already expired - rejected outright, before
+--      the overlap check even runs. expires_at_utc is wrapped in datetime(...)
+--      for the same reason the INSERT trigger above wraps it (see that
+--      trigger's comment) - this was found and fixed together with that one,
+--      before this trigger was ever applied to the schema, so it was never
+--      live with the bug.
+--   2. The slot was taken by someone else in the meantime. Kept as
+--      defense-in-depth even though, under the current design, it's not
+--      reachable independently of #1 (the INSERT trigger already prevents
+--      any competing booking from coexisting with a still-valid tentative
+--      hold) - see ADR 0002's note on this for the full reasoning.
+CREATE TRIGGER no_overlap_on_confirm
+BEFORE UPDATE OF status ON bookings
+WHEN NEW.status = 'confirmed' AND OLD.status = 'tentative'
+BEGIN
+  SELECT RAISE(ABORT, 'hold has expired')
+  WHERE OLD.expires_at_utc IS NOT NULL AND datetime(OLD.expires_at_utc) <= datetime('now');
+
+  SELECT RAISE(ABORT, 'overlapping active booking exists')
+  WHERE EXISTS (
+    SELECT 1 FROM bookings
+    WHERE asset_tag = NEW.asset_tag
+      AND booking_id != NEW.booking_id
+      AND (
+        status = 'confirmed'
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR datetime(expires_at_utc) > datetime('now')))
+      )
+      AND NEW.start_at_utc < end_at_utc
+      AND start_at_utc < NEW.end_at_utc
+  );
+END;
+
 CREATE TABLE users (
   user_id  TEXT,
   name     TEXT,
