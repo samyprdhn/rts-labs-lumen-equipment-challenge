@@ -82,3 +82,10 @@ Append entries with the `checkpoint` skill (or by hand). Newest at the bottom.
 - **Decisions / changes of direction:** none beyond the approved plan.
 - **Next:** idempotency-key handling, the travel buffer, and the frontend (both the reservation-creation form from Part 2 and confirm/release buttons) all remain approved-but-deferred.
 - **Open questions / risks:** the 404-before-403 finding above, explicitly not fixed. Everything else from this increment is closed out.
+
+## 2026-10-29 — Minimal frontend Release button
+- **Done:** `frontend/src/App.tsx` gets a "Release" button on any unavailable equipment card whose conflict shows a `booking_id` (i.e. the viewer has full detail per Part 1's redaction rules) - works for both tentative and confirmed bookings, per the generalized release endpoint. No client-side role pre-filtering; the server's B6 check is the only enforcement, same approach the "Book" button already uses. Every documented response (200/403/404/409/503) maps to a visible message; success refreshes availability.
+- **Tests:** `npm --prefix frontend test -- --run` - 32/32 passing (5 files, up from 25/4): 7 new in `App.release.test.tsx`, including an explicit regression test asserting the real bearer token is sent (not a placeholder) after the earlier `"******"` bug found in the booking-create form. `tsc --noEmit` and `npm run build` both clean.
+- **Decisions / changes of direction:** none - built exactly what was asked (release only; confirm has no UI, wasn't requested).
+- **Next:** a Confirm button, idempotency-key handling, and the travel buffer remain undone.
+- **Open questions / risks:** none new.
