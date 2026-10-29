@@ -1,6 +1,6 @@
 # 03 — Confirm and release a reservation
 
-**Status:** draft, presented for approval. Nothing implemented.
+**Status:** implemented, tested (unit + real-process concurrency), and security-reviewed. Tasks 1-6 done; task 7 (frontend buttons) not attempted.
 **Challenge part(s):** 2
 **Depends on:** [02-reservations.md](02-reservations.md) (status: `POST /api/reservations` done) and [ADR 0002](../decisions/0002-reservation-concurrency-control.md), which already designed and empirically verified the mechanism this plan builds — this is an implementation plan for work ADR 0002 scoped out, not a new design.
 
@@ -99,3 +99,4 @@ Both handlers follow `CreateReservation`'s existing shape: validate shape → **
 
 ## Status log
 - 2026-10-29: created, presented for approval. Nothing implemented.
+- 2026-10-29: tasks 1-6 implemented. Schema (task 1) verified by hand against live SQL before any Go code was written (7 scenarios: confirm valid/expired/overlapping-competitor, zero-rows-but-wrong-status, release from tentative/confirmed, double-release). Confirm/release handlers (tasks 2-3) and routes (task 4) done, reusing `CreateReservation`'s transaction/error-mapping patterns. Found and fixed a real bug while designing the concurrency test (task 5): the confirm handler's zero-rows-affected path trusted a stale pre-read status, which can be outright wrong on a race (not just stale) - fixed with an in-transaction re-read (`currentStatus`), proven correct under genuine concurrent load, not just reasoned about - `TestReservationConcurrency_ReleaseVsConfirmRace` (`backend-go/integration/`) ran 10 trials, both race orderings genuinely occurred (6 confirm-first, 4 release-first), and the release-first trials are live proof of the fix. A second concurrency test (`TestReservationConcurrency_ConfirmingExpiredHold_AllRejected`) proves 20 concurrent confirms of an already-expired hold all fail, 0 successes, 3 trials. `security-review` (task 6, `docs/reviews/2026-10-29-confirm-release.md`) found one Low-severity, judged-not-worth-fixing finding (404-before-403 existence leak, low-risk given the booking_id's 96 bits of entropy). Task 7 (frontend confirm/release buttons) not attempted - optional/stretch per the plan.

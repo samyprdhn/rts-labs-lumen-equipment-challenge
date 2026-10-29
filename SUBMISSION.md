@@ -33,6 +33,12 @@ curl -X POST http://localhost:8080/api/reservations \
   -H "Authorization: Bearer $(npm run token -- u-ops-01 | tail -1)" \
   -H "Content-Type: application/json" \
   -d '{"asset_tag":"SS-001","site_id":"S01","start":"2027-01-01T08:00:00Z","end":"2027-01-01T16:00:00Z","status":"confirmed"}'
+
+# confirm or release it (booking_id comes back in the create response's "data.booking_id")
+curl -X POST "http://localhost:8080/api/reservations/<booking_id>/confirm" \
+  -H "Authorization: Bearer $(npm run token -- u-ops-01 | tail -1)"
+curl -X POST "http://localhost:8080/api/reservations/<booking_id>/release" \
+  -H "Authorization: Bearer $(npm run token -- u-ops-01 | tail -1)"
 ```
 
 > Note: `npm run setup` is stale — it still tries to install `backend-ts`, which no longer exists. Use the steps above instead.
@@ -40,7 +46,7 @@ curl -X POST http://localhost:8080/api/reservations \
 ### Running the tests
 
 ```bash
-cd backend-go && go test ./...                           # unit/HTTP-level tests, ~90 cases, all packages
+cd backend-go && go test ./...                           # unit/HTTP-level tests, 200+ cases, all packages
 cd backend-go && go test -tags integration ./integration/... -v -count=1   # real-process concurrency proof (Part 3A) - see "Testing" below
 npm --prefix frontend test -- --run
 ```
@@ -53,7 +59,7 @@ The integration tests never touch `db/lumen.db` — each one builds its own disp
 
 **Part 1 — Trustworthy `GET /api/equipment/availability`.** Fixed the containment-vs-overlap bug, the 4-format date-string comparison, the asset-tag join, and the missing status filter (cancelled bookings no longer block). Added real JWT verification (the old code accepted any 2-dot garbage string), role/site-scoped authorization on conflict detail, and removed operator PII and `daily_rate_usd` from the response by role. Integrated FleetCare with a TTL cache, bounded timeouts, and a combined `available = bookingAvailable && maintenance.status == "ok"` rule so "maintenance data unknown" can't silently render as available. Frontend: loading/empty/error/retry states, and accessibility fixes (pinch-zoom restored, visible focus outline, real `<button>`s, labeled inputs, text label alongside the color status dot, 44px touch targets). [Plan](docs/plan/01-trustworthy-availability.md).
 
-**Part 2 — `POST /api/reservations` (create only).** The smallest complete, correct version: role/site authorization, operator-certification validity for the whole booking window, and a concurrency guarantee that's actually proven, not just argued — two overlapping reservations for the same asset can never both commit, even at the exact same instant. Confirm, release, and the idempotency-key header are approved in the design but explicitly **not** built in this pass. [Plan](docs/plan/02-reservations.md) · [ADR 0002](docs/decisions/0002-reservation-concurrency-control.md).
+**Part 2 — `POST /api/reservations`, plus confirm/release.** Create: role/site authorization, operator-certification validity for the whole booking window, and a concurrency guarantee that's actually proven, not just argued — two overlapping reservations for the same asset can never both commit, even at the exact same instant. Confirm (`POST /{id}/confirm`, tentative → confirmed) and release (`POST /{id}/release`, tentative **or** confirmed → cancelled — generalized beyond the original tentative-only design) are now implemented too, with their own concurrency proof. The idempotency-key header is still approved in the design but explicitly **not** built. [Plan](docs/plan/02-reservations.md) · [Confirm/release plan](docs/plan/03-confirm-release.md) · [ADR 0002](docs/decisions/0002-reservation-concurrency-control.md).
 
 **Part 3A — Prove the concurrency guarantee.** Done, via the same work Part 2's own completion bar required: a real-process, real-HTTP test (`backend-go/integration/reservation_concurrency_test.go`) fires 20 genuinely simultaneous reservation requests at the actual `cmd/api` binary, 5 times, and shows exactly one wins every time. The mechanism, and how it changes on Postgres or with multiple API instances, is written up in ADR 0002.
 
@@ -114,9 +120,9 @@ FleetCare (`services/maintenance-api`) is called only by the cache's background 
 
 ## Testing
 
-**Backend (`cd backend-go && go test ./...`):** 111 top-level tests (170 including subtests) across `auth`, `availability`, `certs`, `fleetcare`, `handlers`, `server` — all green. Covers happy path, boundaries (adjacent/touching overlap geometry), invalid input, permissions (every role × site combination), external-dependency failure (FleetCare, via deterministic `CHAOS_SEED`s, never live chaos), and data quality (the full 743-row historical reseed, 0 parse failures).
+**Backend (`cd backend-go && go test ./...`):** 120 top-level tests (201 including subtests) across `auth`, `availability`, `certs`, `fleetcare`, `handlers`, `server` — all green. Covers happy path, boundaries (adjacent/touching overlap geometry, expiry edges), invalid input, permissions (every role × site combination, plus confirm/release's owner-or-site-authority rule), external-dependency failure (FleetCare, via deterministic `CHAOS_SEED`s, never live chaos), and data quality (the full 743-row historical reseed, 0 parse failures).
 
-**Concurrency (`go test -tags integration ./integration/... -v -count=1`):** real `cmd/api` binary as its own OS process, real HTTP requests over a real loopback socket, disposable database — never `httptest`, never the developer's working `db/lumen.db`. 5 trials of 20 simultaneous requests for the same overlapping window → exactly one `201` and nineteen `409`s every time, cross-checked against committed DB rows directly. Disjoint-same-asset and overlapping-different-asset cases: 10/10 succeed in both.
+**Concurrency (`go test -tags integration ./integration/... -v -count=1`):** real `cmd/api` binary as its own OS process, real HTTP requests over a real loopback socket, disposable database — never `httptest`, never the developer's working `db/lumen.db`. 5 tests: (1) 5 trials of 20 simultaneous create requests for the same overlapping window → exactly one `201` and nineteen `409`s every time, cross-checked against committed DB rows directly; (2) disjoint-same-asset, 10/10 succeed; (3) overlapping-different-asset, 10/10 succeed; (4) 3 trials of 20 simultaneous confirms of an already-expired hold → all 60 rejected with "hold has expired," row status never changes; (5) a release-vs-confirm race on the same tentative hold, 10 trials — both possible orderings genuinely occurred (6 confirm-first, 4 release-first), final state deterministically `cancelled` either way.
 
 **Regression-detection check:** I deliberately disabled the app-level overlap pre-check mid-implementation and reran the suite. It was caught by tests that assert on response *detail* (conflict body), but **not** by tests that only checked the status code — because the schema trigger backstop alone still returns 409. That's real evidence the trigger works independently of the app-level check (not just argued in the ADR), and it was also a real gap in my first draft of those tests, which I closed before restoring the check.
 
@@ -124,7 +130,9 @@ FleetCare (`services/maintenance-api`) is called only by the cache's background 
 
 **Frontend (`npm --prefix frontend test -- --run`):** 15 tests, 3 files — loading/empty/error/retry states, accessibility (focus, labels, keyboard operability).
 
-**Not covered:** confirm/release and idempotency have no tests because they have no implementation. The 12-hour inter-site travel buffer (Part 1's A7, Part 2's stretch item) was never attempted, so there's nothing to test there either.
+**Confirm/release:** 24 unit/HTTP subtests (happy path for both transitions including release-from-confirmed; 404/403/401; the owner-match-bypasses-role-check case; all 6 B6 authorization combinations for both endpoints; already-confirmed/already-cancelled/expired-hold state conflicts; the trigger's defense-in-depth overlap branch; the expiry boundary). Plus 2 more real-process concurrency tests: 20 concurrent confirms of an already-expired hold (0 successes, all rejected), and a release-vs-confirm race on the same tentative hold (10 trials, both possible orderings genuinely occurred, final state deterministically `cancelled` either way).
+
+**Not covered:** idempotency has no tests because it has no implementation. The 12-hour inter-site travel buffer (Part 1's A7, Part 2's stretch item) was never attempted, so there's nothing to test there either.
 
 ## Questions I would have asked Lumen
 
@@ -132,12 +140,13 @@ FleetCare (`services/maintenance-api`) is called only by the cache's background 
 - **Exact role/site visibility rules**, especially for `safety_manager` (cert-oversight job, but `site_ids:["*"]` in the data) and `subcontractor` (outside company, should see fleet-wide free/busy but never booking detail). Assumed the narrower reading for both, reasoned from the README's own role descriptions and `foreman_messages.jsonl:7`.
 - **Naive timestamp interpretation**: are unlabeled timestamps in site-local time, or UTC? Assumed site-local (humans typed these from a spreadsheet, thinking locally), which turned out to matter: re-checking the historical double-booking count under this assumption found 15 real overlapping pairs, not the 18 an earlier, less careful pass reported.
 - **The exact travel-buffer rule** ("half a day, minimum" — calendar hours? business hours? cranes only, or everything?). Never implemented; would need an answer before attempting it for real.
-- **Who else may confirm or release someone else's tentative hold** (a superintendent, on a foreman's hold at their own site?) — a new question the tentative-hold policy introduced. Assumed yes, matching the existing booking-authority model, but not implemented either way since confirm/release are deferred.
+- **Who else may confirm or release someone else's tentative hold** (a superintendent, on a foreman's hold at their own site?) — a new question the tentative-hold policy introduced. Assumed yes, matching the existing booking-authority model (B6), and this one *is* implemented now — same rule applies identically to releasing a confirmed booking too, since nothing in the source material argues for treating that more strictly.
 - **Is an `Idempotency-Key` header actually expected from the real mobile/field client**, or was that solvable with a simpler retry-safe design? Assumed required, per Marcus's "checking this from a truck... with gloves on" — not implemented in this pass.
 
 ## Known issues / limitations
 
-- **Confirm, release, idempotency, and the travel buffer are not implemented.** All are approved in the design (`docs/plan/02-reservations.md`, ADR 0002) but were explicitly scoped out of this pass, not abandoned silently.
+- **Idempotency and the travel buffer are not implemented** (confirm/release now are — see "What I built"). Both remain approved in the design (`docs/plan/02-reservations.md`, ADR 0002) but explicitly scoped out, not abandoned silently.
+- **A `404` (unknown booking) is returned before a `403` (not authorized) on confirm/release**, so any authenticated caller who knows or guesses a `booking_id` learns whether it exists, even without rights to act on it. Judged low-risk and not fixed: the ID is `crypto/rand`-generated (96 bits), so there's no practical way to acquire a valid-but-unauthorized ID to test in the first place — see `docs/reviews/2026-10-29-confirm-release.md`.
 - **The 15-vs-18 double-booking discrepancy isn't fully reconciled.** Re-checking the historical data under correct site-timezone-aware UTC conversion finds 15 confirmed-vs-confirmed overlapping pairs, not the 18 an earlier recon pass reported. I verified the mechanism (timezone handling) on one pair by hand, but didn't do a full pair-by-pair reconciliation against the original list — see `docs/plan/PROGRESS.md`.
 - **No request-level rate limiting** on either endpoint (pre-existing from Part 1, still true).
 - **SQLite's concurrency guarantee is single-machine.** It serializes every writer against one file on one machine; it does not extend across multiple API instances or a networked filesystem. ADR 0002 covers the Postgres migration path for when that matters.
@@ -150,7 +159,7 @@ FleetCare (`services/maintenance-api`) is called only by the cache's background 
 If this were going to production for Lumen in 3 months:
 
 1. **Postgres migration** before anything else that needs multiple API instances — SQLite's file lock is this design's one real single-machine constraint, and ADR 0002 already specifies the replacement (`EXCLUDE` constraint over `tstzrange`+`btree_gist`, not a ported trigger).
-2. **Confirm/release endpoints + idempotency**, finishing the reservation lifecycle that's already designed and partially built.
+2. **Idempotency-key handling**, the one remaining piece of the reservation lifecycle (confirm/release are now built).
 3. **Observability** (Part 3B): structured logs with request correlation IDs, FleetCare latency/error metrics, health/readiness checks beyond the current bare `/healthz`, and an audit trail of who booked/changed what — right now that's only implicit in the `booked_by`/`created_at` columns, not a queryable log.
 4. **Real SSO** (Entra ID, per Lumen's IT constraints) instead of the current dev-token/shared-secret JWT scheme, which is fine for this exercise but not for a real deployment.
 5. **Schema redesign for scale** (Part 3C): proper constraints, indexes on `asset_tag`/`site_id`/the UTC date columns, and a design for 120 sites / 600 assets / possibly multiple client companies sharing one deployment — including revisiting the FleetCare batch/rate-limit strategy at that volume.

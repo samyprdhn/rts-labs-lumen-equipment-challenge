@@ -1,6 +1,6 @@
 # 02 — Reservations (Part 2)
 
-**Status:** `POST /api/reservations` (task 3) implemented, tested (unit + real-process concurrency), and security-reviewed. Confirm/release (task 4), idempotency (task 5), travel buffer (task 8), and the frontend form (task 9) remain approved in design but explicitly deferred — not implemented without separate approval, per instruction.
+**Status:** `POST /api/reservations` (task 3) and confirm/release (task 4, see [03-confirm-release.md](03-confirm-release.md)) implemented, tested (unit + real-process concurrency), and security-reviewed. Idempotency (task 5), travel buffer (task 8), and the frontend form (task 9) remain approved in design but explicitly deferred.
 **Challenge part(s):** 2
 **Depends on:** Part 1 ([01-trustworthy-availability.md](01-trustworthy-availability.md), status: done) for the overlap/date-parsing/authorization primitives this plan reuses. Concurrency mechanism: [ADR 0002](../decisions/0002-reservation-concurrency-control.md).
 
