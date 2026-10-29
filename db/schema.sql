@@ -88,6 +88,20 @@ CREATE TABLE bookings (
 -- rejects a seed load. It protects every row written through
 -- POST /api/reservations going forward, which always populates these
 -- columns at insert time.
+--
+-- expires_at_utc is wrapped in datetime(...) before comparing against
+-- datetime('now') - comparing the raw TEXT column directly is wrong
+-- whenever both share the same calendar day: our own canonical format is
+-- "...T...Z" but datetime('now') returns "... ..." (space-separated), so
+-- the 'T' character (0x54) always lexicographically outranks the space
+-- (0x20) at that position, making an expiry from EARLIER TODAY compare as
+-- "greater than now" (i.e. "not yet expired") regardless of the actual
+-- time values that follow. datetime(...) re-parses both sides into
+-- SQLite's own canonical format first, making the comparison correct.
+-- Found via a real test failure that only manifested hours into a long
+-- session, once "1 hour ago" stopped crossing a UTC midnight boundary by
+-- accident - not caught by inspection, only by the comparison actually
+-- being exercised at the right (or rather wrong) time of day.
 CREATE TRIGGER no_overlapping_active_bookings
 BEFORE INSERT ON bookings
 WHEN NEW.status IN ('confirmed', 'tentative')
@@ -98,7 +112,7 @@ BEGIN
     WHERE asset_tag = NEW.asset_tag
       AND (
         status = 'confirmed'
-        OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR datetime(expires_at_utc) > datetime('now')))
       )
       AND NEW.start_at_utc < end_at_utc
       AND start_at_utc < NEW.end_at_utc

@@ -322,6 +322,12 @@ func CreateReservation(w http.ResponseWriter, r *http.Request) {
 // against the new booking's canonical UTC window - so a real conflict is
 // reported here, with detail, before ever attempting the INSERT whose own
 // rejection (by design) carries none.
+//
+// expires_at_utc is wrapped in datetime(...) before comparing against
+// datetime('now') for the same reason the trigger does: our canonical
+// format is "...T...Z" but datetime('now') returns a space-separated
+// string, so a raw comparison is wrong for any expiry on the same
+// calendar day as "now" (see schema.sql's comment on the trigger).
 func findActiveConflict(ctx context.Context, conn *sql.Conn, assetTag, startUTC, endUTC string) (*availability.Conflict, error) {
 	row := conn.QueryRowContext(ctx, `
 		SELECT booking_id, site_id, start_at, end_at, status, operator_id
@@ -329,7 +335,7 @@ func findActiveConflict(ctx context.Context, conn *sql.Conn, assetTag, startUTC,
 		WHERE asset_tag = ?
 		  AND (
 		    status = 'confirmed'
-		    OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+		    OR (status = 'tentative' AND (expires_at_utc IS NULL OR datetime(expires_at_utc) > datetime('now')))
 		  )
 		  AND ? < end_at_utc
 		  AND start_at_utc < ?

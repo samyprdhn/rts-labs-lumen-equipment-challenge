@@ -2,6 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-10-28 (revised same day — tentative-hold lifecycle resolved, see "Tentative-hold lifecycle" below; accepted for implementation same day, scoped to `POST /api/reservations` only — the confirm/release endpoints and their `BEFORE UPDATE` trigger are approved in design but explicitly deferred to a separate implementation pass, not built in this one)
+- **Also the write-up for challenge Part 3A** ("prove the concurrency guarantee"): the "Options considered" and "Postgres / multi-instance" sections below are that explanation. The test itself is `backend-go/integration/reservation_concurrency_test.go` (`go test -tags integration ./integration/...`) — a real `cmd/api` process, real concurrent HTTP requests, 5 trials of 20 simultaneous requests for the same overlapping window, exactly one winner every time, verified against committed DB rows directly.
 
 ## Context
 
@@ -41,7 +42,7 @@ BEGIN
     WHERE asset_tag = NEW.asset_tag
       AND (
         status = 'confirmed'
-        OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR datetime(expires_at_utc) > datetime('now')))
       )
       AND NEW.start_at_utc < end_at_utc
       AND start_at_utc < NEW.end_at_utc
@@ -87,7 +88,7 @@ BEFORE UPDATE OF status ON bookings
 WHEN NEW.status = 'confirmed' AND OLD.status = 'tentative'
 BEGIN
   SELECT RAISE(ABORT, 'hold has expired')
-  WHERE OLD.expires_at_utc IS NOT NULL AND OLD.expires_at_utc <= datetime('now');
+  WHERE OLD.expires_at_utc IS NOT NULL AND datetime(OLD.expires_at_utc) <= datetime('now');
 
   SELECT RAISE(ABORT, 'overlapping active booking exists')
   WHERE EXISTS (
@@ -96,7 +97,7 @@ BEGIN
       AND booking_id != NEW.booking_id
       AND (
         status = 'confirmed'
-        OR (status = 'tentative' AND (expires_at_utc IS NULL OR expires_at_utc > datetime('now')))
+        OR (status = 'tentative' AND (expires_at_utc IS NULL OR datetime(expires_at_utc) > datetime('now')))
       )
       AND NEW.start_at_utc < end_at_utc
       AND start_at_utc < NEW.end_at_utc
@@ -117,6 +118,8 @@ END;
 **Note on the overlap-check branch of the confirm trigger:** under the current design, it's currently unreachable in practice — the `INSERT` trigger already prevents any competing booking from ever coexisting with a still-valid tentative hold, so by the time a confirm attempt could collide with something else, the hold being confirmed has necessarily already expired (caught by the first `RAISE`, as in the table above). It's kept anyway, deliberately, as defense-in-depth: if a future change relaxes the `INSERT` trigger's blocking rule, this backstop still protects the confirm path independently, without anyone having to remember the connection between the two triggers. The exact boundary race (a confirm attempt and a competing insert arriving within the same instant as a hold's expiry) is deterministic-testable and is specified as its own test case in the Part 2 plan's task breakdown, to be written during implementation.
 
 **Release** (explicit early release of a still-tentative hold) needs no new trigger — `UPDATE bookings SET status='cancelled' WHERE booking_id=? AND status='tentative'` can only ever resolve a conflict, never create one. It needs an authorization check (proposed: the original requester, or anyone who could have confirmed it) but no concurrency protection beyond what SQLite's ordinary locking already gives a single-row `UPDATE`.
+
+**Correction found during Part 2 implementation (`expires_at_utc` comparisons):** both `expires_at_utc > datetime('now')` above (and the confirm trigger's `OLD.expires_at_utc <= datetime('now')`) were originally written as a raw comparison against the TEXT column. That's wrong whenever the expiry and "now" share the same calendar day: this codebase's canonical UTC format is `...T...Z`, but SQLite's `datetime('now')` returns a space-separated string, and the `'T'` character (0x54) always lexicographically outranks a space (0x20) at that position — so an expiry from *earlier the same day* compared as "still in the future" (not yet expired) regardless of the actual time values that followed. Confirmed empirically (`sqlite3`, both the broken and fixed forms side by side) and caught by a real test failure that only manifested hours into the session, once "1 hour ago" stopped crossing a UTC-midnight boundary by chance. Fixed by wrapping the stored column in `datetime(...)` before comparing, in both the `INSERT` trigger above and the handler's app-level pre-check (`internal/handlers/reservations.go`'s `findActiveConflict`) — not yet re-verified in the confirm trigger above, since it isn't built; whoever builds it must carry the corrected form shown here, not the version that was in this ADR before this correction.
 
 ## Consequences
 
